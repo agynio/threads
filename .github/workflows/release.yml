@@ -54,8 +54,10 @@ jobs:
           curl -sSL https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Linux-x86_64.tar.gz \
             | sudo tar -xzf - -C /usr/local --strip-components=1 buf/bin/buf
 
-      - name: Set release version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Set release versions
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "CHART_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Generate protobufs
         run: make proto
@@ -80,7 +82,7 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ghcr.io/agynio/threads:${{ env.VERSION }}
+            ghcr.io/agynio/threads:${{ env.RELEASE_VERSION }}
             ghcr.io/agynio/threads:latest
             ghcr.io/agynio/threads:${{ github.sha }}
 
@@ -89,11 +91,9 @@ jobs:
 
       - name: Package Helm chart
         run: |
-          helm package charts/threads --version "${VERSION}" --app-version "${VERSION}"
+          helm package charts/threads --version "${CHART_VERSION}" --app-version "${CHART_VERSION}"
 
       - name: Push Helm chart to GHCR
-        env:
-          VERSION: ${{ env.VERSION }}
         run: |
           helm registry login ghcr.io --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
-          helm push threads-${VERSION}.tgz oci://ghcr.io/agynio/charts
+          helm push threads-${CHART_VERSION}.tgz oci://ghcr.io/agynio/charts
