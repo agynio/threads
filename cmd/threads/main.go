@@ -52,7 +52,7 @@ func run() error {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 
-	notificationsConn, err := grpc.DialContext(ctx, cfg.NotificationsAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	notificationsConn, err := grpc.NewClient(cfg.NotificationsAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("dial notifications: %w", err)
 	}

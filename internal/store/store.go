@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -102,6 +103,32 @@ func loadParticipants(ctx context.Context, q queryer, threadID uuid.UUID) ([]Par
 		return nil, err
 	}
 	return participants, nil
+}
+
+func loadParticipantsByThreadIDs(ctx context.Context, q queryer, threadIDs []uuid.UUID) (map[uuid.UUID][]Participant, error) {
+	participantsByThread := make(map[uuid.UUID][]Participant)
+	if len(threadIDs) == 0 {
+		return participantsByThread, nil
+	}
+	threadIDArray := pgtype.FlatArray[uuid.UUID](threadIDs)
+	rows, err := q.Query(ctx, `SELECT thread_id, participant_id, joined_at FROM thread_participants WHERE thread_id = ANY($1) ORDER BY thread_id ASC, joined_at ASC, participant_id ASC`, threadIDArray)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var threadID uuid.UUID
+		var participant Participant
+		if err := rows.Scan(&threadID, &participant.ID, &participant.JoinedAt); err != nil {
+			return nil, err
+		}
+		participantsByThread[threadID] = append(participantsByThread[threadID], participant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return participantsByThread, nil
 }
 
 func ensureThreadExists(ctx context.Context, q queryer, threadID uuid.UUID) error {

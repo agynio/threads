@@ -76,9 +76,9 @@ type messagePageToken struct {
 	MessageID      string `json:"message_id"`
 }
 
-func EncodeThreadMessagePageToken(threadID uuid.UUID, cursor MessageCursor) (string, error) {
+func EncodeMessagePageToken(ownerID uuid.UUID, cursor MessageCursor) (string, error) {
 	payload := messagePageToken{
-		OwnerID:        threadID.String(),
+		OwnerID:        ownerID.String(),
 		CreatedAtNanos: cursor.CreatedAt.UnixNano(),
 		MessageID:      cursor.MessageID.String(),
 	}
@@ -89,46 +89,7 @@ func EncodeThreadMessagePageToken(threadID uuid.UUID, cursor MessageCursor) (str
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-func DecodeThreadMessagePageToken(token string) (uuid.UUID, MessageCursor, error) {
-	if token == "" {
-		return uuid.UUID{}, MessageCursor{}, errors.New("empty token")
-	}
-	data, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil {
-		return uuid.UUID{}, MessageCursor{}, fmt.Errorf("decode token: %w", err)
-	}
-	var payload messagePageToken
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return uuid.UUID{}, MessageCursor{}, fmt.Errorf("unmarshal token: %w", err)
-	}
-	ownerID, err := uuid.Parse(payload.OwnerID)
-	if err != nil {
-		return uuid.UUID{}, MessageCursor{}, fmt.Errorf("parse owner id: %w", err)
-	}
-	messageID, err := uuid.Parse(payload.MessageID)
-	if err != nil {
-		return uuid.UUID{}, MessageCursor{}, fmt.Errorf("parse message id: %w", err)
-	}
-	return ownerID, MessageCursor{
-		CreatedAt: time.Unix(0, payload.CreatedAtNanos).UTC(),
-		MessageID: messageID,
-	}, nil
-}
-
-func EncodeUnackedMessagePageToken(participantID uuid.UUID, cursor MessageCursor) (string, error) {
-	payload := messagePageToken{
-		OwnerID:        participantID.String(),
-		CreatedAtNanos: cursor.CreatedAt.UnixNano(),
-		MessageID:      cursor.MessageID.String(),
-	}
-	buf, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
-func DecodeUnackedMessagePageToken(token string) (uuid.UUID, MessageCursor, error) {
+func DecodeMessagePageToken(token string) (uuid.UUID, MessageCursor, error) {
 	if token == "" {
 		return uuid.UUID{}, MessageCursor{}, errors.New("empty token")
 	}

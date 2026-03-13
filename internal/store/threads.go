@@ -167,13 +167,16 @@ func (s *Store) ListThreads(ctx context.Context, participantID uuid.UUID, pageSi
 	if hasMore {
 		nextCursor = &ThreadCursor{UpdatedAt: lastTime, ThreadID: lastID}
 	}
-
+	threadIDs := make([]uuid.UUID, len(threads))
+	for i, thread := range threads {
+		threadIDs[i] = thread.ID
+	}
+	participantsByThread, err := loadParticipantsByThreadIDs(ctx, s.pool, threadIDs)
+	if err != nil {
+		return ThreadListResult{}, err
+	}
 	for i := range threads {
-		participants, err := loadParticipants(ctx, s.pool, threads[i].ID)
-		if err != nil {
-			return ThreadListResult{}, err
-		}
-		threads[i].Participants = participants
+		threads[i].Participants = participantsByThread[threads[i].ID]
 	}
 
 	return ThreadListResult{Threads: threads, NextCursor: nextCursor}, nil

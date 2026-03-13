@@ -1,8 +1,3 @@
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version TEXT PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 CREATE TABLE threads (
     id UUID PRIMARY KEY,
     status SMALLINT NOT NULL,

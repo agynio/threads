@@ -151,7 +151,7 @@ func (s *Server) GetMessages(ctx context.Context, req *threadsv1.GetMessagesRequ
 	}
 	var cursor *store.MessageCursor
 	if token := req.GetPageToken(); token != "" {
-		tokenID, tokenCursor, err := store.DecodeThreadMessagePageToken(token)
+		tokenID, tokenCursor, err := store.DecodeMessagePageToken(token)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
 		}
@@ -170,7 +170,7 @@ func (s *Server) GetMessages(ctx context.Context, req *threadsv1.GetMessagesRequ
 		resp.Messages[i] = toProtoMessage(message)
 	}
 	if result.NextCursor != nil {
-		token, err := store.EncodeThreadMessagePageToken(threadID, *result.NextCursor)
+		token, err := store.EncodeMessagePageToken(threadID, *result.NextCursor)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode page token: %v", err)
 		}
@@ -186,7 +186,7 @@ func (s *Server) GetUnackedMessages(ctx context.Context, req *threadsv1.GetUnack
 	}
 	var cursor *store.MessageCursor
 	if token := req.GetPageToken(); token != "" {
-		tokenID, tokenCursor, err := store.DecodeUnackedMessagePageToken(token)
+		tokenID, tokenCursor, err := store.DecodeMessagePageToken(token)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
 		}
@@ -205,7 +205,7 @@ func (s *Server) GetUnackedMessages(ctx context.Context, req *threadsv1.GetUnack
 		resp.Messages[i] = toProtoMessage(message)
 	}
 	if result.NextCursor != nil {
-		token, err := store.EncodeUnackedMessagePageToken(participantID, *result.NextCursor)
+		token, err := store.EncodeMessagePageToken(participantID, *result.NextCursor)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode page token: %v", err)
 		}

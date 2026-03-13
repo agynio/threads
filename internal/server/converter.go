@@ -1,6 +1,8 @@
 package server
 
 import (
+	"fmt"
+
 	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -14,13 +16,11 @@ func toProtoThread(thread store.Thread) *threadsv1.Thread {
 		CreatedAt: timestamppb.New(thread.CreatedAt),
 		UpdatedAt: timestamppb.New(thread.UpdatedAt),
 	}
-	if len(thread.Participants) > 0 {
-		protoThread.Participants = make([]*threadsv1.Participant, len(thread.Participants))
-		for i, participant := range thread.Participants {
-			protoThread.Participants[i] = &threadsv1.Participant{
-				Id:       participant.ID.String(),
-				JoinedAt: timestamppb.New(participant.JoinedAt),
-			}
+	protoThread.Participants = make([]*threadsv1.Participant, len(thread.Participants))
+	for i, participant := range thread.Participants {
+		protoThread.Participants[i] = &threadsv1.Participant{
+			Id:       participant.ID.String(),
+			JoinedAt: timestamppb.New(participant.JoinedAt),
 		}
 	}
 	return protoThread
@@ -48,6 +48,6 @@ func toProtoThreadStatus(status store.ThreadStatus) threadsv1.ThreadStatus {
 	case store.ThreadStatusArchived:
 		return threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED
 	default:
-		return threadsv1.ThreadStatus_THREAD_STATUS_UNSPECIFIED
+		panic(fmt.Sprintf("unexpected thread status: %d", status))
 	}
 }

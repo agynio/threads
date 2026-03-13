@@ -7,11 +7,21 @@ ARG TARGETARCH
 
 WORKDIR /src
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -sSL https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Linux-x86_64.tar.gz \
+    | tar -xzf - -C /usr/local --strip-components=1 buf/bin/buf
+
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY . .
+
+RUN buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

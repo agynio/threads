@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -95,6 +96,48 @@ func loadRecipients(ctx context.Context, q queryer, threadID, senderID uuid.UUID
 	return recipients, nil
 }
 
+func (s *Store) scanMessagePage(ctx context.Context, query string, args []any, limit int32) (MessageListResult, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return MessageListResult{}, err
+	}
+	defer rows.Close()
+
+	messages := make([]Message, 0, limit)
+	var (
+		nextCursor *MessageCursor
+		lastID     uuid.UUID
+		lastTime   time.Time
+		hasMore    bool
+	)
+	for rows.Next() {
+		var msg Message
+		var fileIDs []string
+		if err := rows.Scan(&msg.ID, &msg.ThreadID, &msg.SenderID, &msg.Body, &fileIDs, &msg.CreatedAt); err != nil {
+			return MessageListResult{}, err
+		}
+		if int32(len(messages)) == limit {
+			hasMore = true
+			break
+		}
+		parsedIDs, err := stringsToUUIDs(fileIDs)
+		if err != nil {
+			return MessageListResult{}, fmt.Errorf("parse file ids: %w", err)
+		}
+		msg.FileIDs = parsedIDs
+		messages = append(messages, msg)
+		lastID = msg.ID
+		lastTime = msg.CreatedAt
+	}
+	if err := rows.Err(); err != nil {
+		return MessageListResult{}, err
+	}
+	if hasMore {
+		nextCursor = &MessageCursor{CreatedAt: lastTime, MessageID: lastID}
+	}
+	return MessageListResult{Messages: messages, NextCursor: nextCursor}, nil
+}
+
 func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *MessageCursor) (MessageListResult, error) {
 	if err := ensureThreadExists(ctx, s.pool, threadID); err != nil {
 		return MessageListResult{}, err
@@ -114,45 +157,7 @@ func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize i
 	query.WriteString(fmt.Sprintf(" ORDER BY created_at ASC, id ASC LIMIT $%d", paramIndex))
 	args = append(args, int(limit)+1)
 
-	rows, err := s.pool.Query(ctx, query.String(), args...)
-	if err != nil {
-		return MessageListResult{}, err
-	}
-	defer rows.Close()
-
-	messages := make([]Message, 0, limit)
-	var (
-		nextCursor *MessageCursor
-		lastID     uuid.UUID
-		lastTime   time.Time
-		hasMore    bool
-	)
-	for rows.Next() {
-		var msg Message
-		var fileIDs []string
-		if err := rows.Scan(&msg.ID, &msg.ThreadID, &msg.SenderID, &msg.Body, &fileIDs, &msg.CreatedAt); err != nil {
-			return MessageListResult{}, err
-		}
-		if int32(len(messages)) == limit {
-			hasMore = true
-			break
-		}
-		parsedIDs, err := stringsToUUIDs(fileIDs)
-		if err != nil {
-			return MessageListResult{}, fmt.Errorf("parse file ids: %w", err)
-		}
-		msg.FileIDs = parsedIDs
-		messages = append(messages, msg)
-		lastID = msg.ID
-		lastTime = msg.CreatedAt
-	}
-	if err := rows.Err(); err != nil {
-		return MessageListResult{}, err
-	}
-	if hasMore {
-		nextCursor = &MessageCursor{CreatedAt: lastTime, MessageID: lastID}
-	}
-	return MessageListResult{Messages: messages, NextCursor: nextCursor}, nil
+	return s.scanMessagePage(ctx, query.String(), args, limit)
 }
 
 func (s *Store) ListUnackedMessages(ctx context.Context, participantID uuid.UUID, pageSize int32, cursor *MessageCursor) (MessageListResult, error) {
@@ -172,45 +177,7 @@ func (s *Store) ListUnackedMessages(ctx context.Context, participantID uuid.UUID
 	query.WriteString(fmt.Sprintf(" ORDER BY m.created_at ASC, m.id ASC LIMIT $%d", paramIndex))
 	args = append(args, int(limit)+1)
 
-	rows, err := s.pool.Query(ctx, query.String(), args...)
-	if err != nil {
-		return MessageListResult{}, err
-	}
-	defer rows.Close()
-
-	messages := make([]Message, 0, limit)
-	var (
-		nextCursor *MessageCursor
-		lastID     uuid.UUID
-		lastTime   time.Time
-		hasMore    bool
-	)
-	for rows.Next() {
-		var msg Message
-		var fileIDs []string
-		if err := rows.Scan(&msg.ID, &msg.ThreadID, &msg.SenderID, &msg.Body, &fileIDs, &msg.CreatedAt); err != nil {
-			return MessageListResult{}, err
-		}
-		if int32(len(messages)) == limit {
-			hasMore = true
-			break
-		}
-		parsedIDs, err := stringsToUUIDs(fileIDs)
-		if err != nil {
-			return MessageListResult{}, fmt.Errorf("parse file ids: %w", err)
-		}
-		msg.FileIDs = parsedIDs
-		messages = append(messages, msg)
-		lastID = msg.ID
-		lastTime = msg.CreatedAt
-	}
-	if err := rows.Err(); err != nil {
-		return MessageListResult{}, err
-	}
-	if hasMore {
-		nextCursor = &MessageCursor{CreatedAt: lastTime, MessageID: lastID}
-	}
-	return MessageListResult{Messages: messages, NextCursor: nextCursor}, nil
+	return s.scanMessagePage(ctx, query.String(), args, limit)
 }
 
 func (s *Store) AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error) {
@@ -221,7 +188,7 @@ func (s *Store) AckMessages(ctx context.Context, participantID uuid.UUID, messag
 		return 0, err
 	}
 	count := cmd.RowsAffected()
-	if count > int64(^uint32(0)>>1) {
+	if count > math.MaxInt32 {
 		return 0, fmt.Errorf("acked count overflow: %d", count)
 	}
 	return int32(count), nil
