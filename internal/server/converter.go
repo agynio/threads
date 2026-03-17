@@ -1,7 +1,7 @@
 package server
 
 import (
-	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
+	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/agynio/threads/internal/store"

@@ -1,16 +1,18 @@
-version: v1
+version: v2
+
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/agynio/threads/.gen/go
 
 plugins:
-  - plugin: buf.build/protocolbuffers/go
-    out: gen/go
+  - remote: buf.build/protocolbuffers/go
+    out: .gen/go
     opt:
       - paths=source_relative
-      - Magynio/api/threads/v1/threads.proto=github.com/agynio/threads/gen/go/agynio/api/threads/v1
-      - Magynio/api/notifications/v1/notifications.proto=github.com/agynio/threads/gen/go/agynio/api/notifications/v1
-  - plugin: buf.build/grpc/go
-    out: gen/go
+  - remote: buf.build/grpc/go
+    out: .gen/go
     opt:
       - paths=source_relative
       - require_unimplemented_servers=false
-      - Magynio/api/threads/v1/threads.proto=github.com/agynio/threads/gen/go/agynio/api/threads/v1
-      - Magynio/api/notifications/v1/notifications.proto=github.com/agynio/threads/gen/go/agynio/api/notifications/v1
