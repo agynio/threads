@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
+	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

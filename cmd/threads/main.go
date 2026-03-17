@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	notificationsv1 "github.com/agynio/threads/gen/go/agynio/api/notifications/v1"
-	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
+	notificationsv1 "github.com/agynio/threads/.gen/go/agynio/api/notifications/v1"
+	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
