@@ -61,7 +61,7 @@ notifications:
   address: ""
 
 identity:
-  address: ""
+  address: "identity:50051"
 
 authorization:
-  address: ""
+  address: "authorization:50051"

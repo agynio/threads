@@ -17,7 +17,14 @@ type SendMessageResult struct {
 	Recipients []uuid.UUID
 }
 
-func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, senderIsApp bool) (SendMessageResult, error) {
+type RecipientMode int
+
+const (
+	RecipientsExcludeSender RecipientMode = iota
+	RecipientsAll
+)
+
+func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, recipientMode RecipientMode) (SendMessageResult, error) {
 	var result SendMessageResult
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
 		status, _, _, err := loadThreadRow(ctx, tx, threadID, true)
@@ -28,12 +35,13 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 			return ErrThreadArchived
 		}
 		var recipients []uuid.UUID
-		if senderIsApp {
+		switch recipientMode {
+		case RecipientsAll:
 			recipients, err = loadAllParticipants(ctx, tx, threadID)
 			if err != nil {
 				return err
 			}
-		} else {
+		case RecipientsExcludeSender:
 			var isParticipant bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM thread_participants WHERE thread_id = $1 AND participant_id = $2)`, threadID, senderID).Scan(&isParticipant); err != nil {
 				return err
@@ -45,6 +53,8 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 			if err != nil {
 				return err
 			}
+		default:
+			return fmt.Errorf("invalid recipient mode: %d", recipientMode)
 		}
 		now := time.Now().UTC()
 		messageID := uuid.New()
@@ -84,42 +94,29 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 }
 
 func loadRecipients(ctx context.Context, q queryer, threadID, senderID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.Query(ctx, `SELECT participant_id FROM thread_participants WHERE thread_id = $1 AND participant_id <> $2 ORDER BY participant_id ASC`, threadID, senderID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	recipients := []uuid.UUID{}
-	for rows.Next() {
-		var recipientID uuid.UUID
-		if err := rows.Scan(&recipientID); err != nil {
-			return nil, err
-		}
-		recipients = append(recipients, recipientID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return recipients, nil
+	return scanUUIDs(ctx, q, `SELECT participant_id FROM thread_participants WHERE thread_id = $1 AND participant_id <> $2 ORDER BY participant_id ASC`, threadID, senderID)
 }
 
 func loadAllParticipants(ctx context.Context, q queryer, threadID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.Query(ctx, `SELECT participant_id FROM thread_participants WHERE thread_id = $1 ORDER BY participant_id ASC`, threadID)
+	return scanUUIDs(ctx, q, `SELECT participant_id FROM thread_participants WHERE thread_id = $1 ORDER BY participant_id ASC`, threadID)
+}
+
+func scanUUIDs(ctx context.Context, q queryer, query string, args ...any) ([]uuid.UUID, error) {
+	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	participants := []uuid.UUID{}
+	ids := []uuid.UUID{}
 	for rows.Next() {
-		var participantID uuid.UUID
-		if err := rows.Scan(&participantID); err != nil {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		participants = append(participants, participantID)
+		ids = append(ids, id)
 	}
-	return participants, rows.Err()
+	return ids, rows.Err()
 }
 
 func (s *Store) scanMessagePage(ctx context.Context, query string, args []any, limit int32) (MessageListResult, error) {

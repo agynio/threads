@@ -114,13 +114,15 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 		return nil, status.Errorf(codes.Internal, "resolve sender identity: %v", err)
 	}
 	senderIsApp := identityResp.GetIdentityType() == identityv1.IdentityType_IDENTITY_TYPE_APP
+	recipientMode := store.RecipientsExcludeSender
 	if senderIsApp {
 		if err := s.requireClusterWriter(ctx, senderID); err != nil {
 			return nil, err
 		}
+		recipientMode = store.RecipientsAll
 	}
 
-	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs, senderIsApp)
+	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs, recipientMode)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -133,7 +135,7 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 func (s *Server) requireClusterWriter(ctx context.Context, identityID uuid.UUID) error {
 	resp, err := s.authorizationClient.Check(ctx, &authorizationv1.CheckRequest{
 		TupleKey: &authorizationv1.TupleKey{
-			User:     fmt.Sprintf("identity:%s", identityID.String()),
+			User:     fmt.Sprintf("identity:%s", identityID),
 			Relation: "writer",
 			Object:   "cluster:global",
 		},
