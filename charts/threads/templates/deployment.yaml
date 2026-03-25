@@ -94,6 +94,10 @@ spec:
               {{- end }}
             - name: NOTIFICATIONS_ADDRESS
               value: {{ required "notifications.address must be set" .Values.notifications.address | quote }}
+            - name: IDENTITY_ADDRESS
+              value: {{ required "identity.address must be set" .Values.identity.address | quote }}
+            - name: AUTHORIZATION_ADDRESS
+              value: {{ required "authorization.address must be set" .Values.authorization.address | quote }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
