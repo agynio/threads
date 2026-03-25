@@ -25,7 +25,7 @@ jobs:
 
       - name: Generate protobuf bindings
         run: |
-          buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1
+          buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1 --path agynio/api/identity/v1 --path agynio/api/authorization/v1 --include-imports
 
       - name: Run tests
         run: go test ./...

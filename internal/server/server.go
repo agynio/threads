@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	authorizationv1 "github.com/agynio/threads/gen/go/agynio/api/authorization/v1"
+	identityv1 "github.com/agynio/threads/gen/go/agynio/api/identity/v1"
 	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -16,12 +18,14 @@ import (
 
 type Server struct {
 	threadsv1.UnimplementedThreadsServiceServer
-	store    *store.Store
-	notifier *notifier.Notifier
+	store               *store.Store
+	notifier            *notifier.Notifier
+	identityClient      identityv1.IdentityServiceClient
+	authorizationClient authorizationv1.AuthorizationServiceClient
 }
 
-func New(store *store.Store, notifier *notifier.Notifier) *Server {
-	return &Server{store: store, notifier: notifier}
+func New(store *store.Store, notifier *notifier.Notifier, identityClient identityv1.IdentityServiceClient, authorizationClient authorizationv1.AuthorizationServiceClient) *Server {
+	return &Server{store: store, notifier: notifier, identityClient: identityClient, authorizationClient: authorizationClient}
 }
 
 func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRequest) (*threadsv1.CreateThreadResponse, error) {
@@ -99,7 +103,24 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 		fileIDs[i] = id
 	}
 
-	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs)
+	identityResp, err := s.identityClient.GetIdentityType(ctx, &identityv1.GetIdentityTypeRequest{
+		IdentityId: senderID.String(),
+	})
+	if err != nil {
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.NotFound {
+			return nil, status.Error(codes.InvalidArgument, "sender_id: identity not found")
+		}
+		return nil, status.Errorf(codes.Internal, "resolve sender identity: %v", err)
+	}
+	senderIsApp := identityResp.GetIdentityType() == identityv1.IdentityType_IDENTITY_TYPE_APP
+	if senderIsApp {
+		if err := s.requireClusterWriter(ctx, senderID); err != nil {
+			return nil, err
+		}
+	}
+
+	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs, senderIsApp)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -107,6 +128,23 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 		return nil, status.Errorf(codes.Internal, "notify recipients: %v", err)
 	}
 	return &threadsv1.SendMessageResponse{Message: toProtoMessage(result.Message)}, nil
+}
+
+func (s *Server) requireClusterWriter(ctx context.Context, identityID uuid.UUID) error {
+	resp, err := s.authorizationClient.Check(ctx, &authorizationv1.CheckRequest{
+		TupleKey: &authorizationv1.TupleKey{
+			User:     fmt.Sprintf("identity:%s", identityID.String()),
+			Relation: "writer",
+			Object:   "cluster:global",
+		},
+	})
+	if err != nil {
+		return status.Errorf(codes.Internal, "authorization check: %v", err)
+	}
+	if !resp.GetAllowed() {
+		return status.Error(codes.PermissionDenied, "permission denied")
+	}
+	return nil
 }
 
 func (s *Server) GetThreads(ctx context.Context, req *threadsv1.GetThreadsRequest) (*threadsv1.GetThreadsResponse, error) {

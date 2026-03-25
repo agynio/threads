@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	authorizationv1 "github.com/agynio/threads/gen/go/agynio/api/authorization/v1"
+	identityv1 "github.com/agynio/threads/gen/go/agynio/api/identity/v1"
 	notificationsv1 "github.com/agynio/threads/gen/go/agynio/api/notifications/v1"
 	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,16 +54,33 @@ func run() error {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 
-	notificationsConn, err := grpc.NewClient(cfg.NotificationsAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	notificationsConn, err := grpc.DialContext(ctx, cfg.NotificationsAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("dial notifications: %w", err)
 	}
 	defer notificationsConn.Close()
 
+	identityConn, err := grpc.DialContext(ctx, cfg.IdentityAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial identity: %w", err)
+	}
+	defer identityConn.Close()
+
+	authorizationConn, err := grpc.DialContext(ctx, cfg.AuthorizationAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial authorization: %w", err)
+	}
+	defer authorizationConn.Close()
+
 	threadsServer := grpc.NewServer()
 	threadsv1.RegisterThreadsServiceServer(
 		threadsServer,
-		server.New(store.NewStore(pool), notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn))),
+		server.New(
+			store.NewStore(pool),
+			notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn)),
+			identityv1.NewIdentityServiceClient(identityConn),
+			authorizationv1.NewAuthorizationServiceClient(authorizationConn),
+		),
 	)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)

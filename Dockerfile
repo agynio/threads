@@ -18,10 +18,9 @@ RUN curl -sSL https://github.com/bufbuild/buf/releases/download/v1.64.0/buf-Linu
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
-
 COPY . .
 
-RUN buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1
+RUN buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1 --path agynio/api/identity/v1 --path agynio/api/authorization/v1 --include-imports
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

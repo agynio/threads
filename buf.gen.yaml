@@ -1,16 +1,22 @@
-version: v1
+version: v2
 
 plugins:
-  - plugin: buf.build/protocolbuffers/go
+  - remote: buf.build/protocolbuffers/go
     out: gen/go
     opt:
       - paths=source_relative
       - Magynio/api/threads/v1/threads.proto=github.com/agynio/threads/gen/go/agynio/api/threads/v1
       - Magynio/api/notifications/v1/notifications.proto=github.com/agynio/threads/gen/go/agynio/api/notifications/v1
-  - plugin: buf.build/grpc/go
+      - Magynio/api/identity/v1/identity.proto=github.com/agynio/threads/gen/go/agynio/api/identity/v1
+      - Magynio/api/authorization/v1/authorization.proto=github.com/agynio/threads/gen/go/agynio/api/authorization/v1
+    include_imports: true
+  - remote: buf.build/grpc/go
     out: gen/go
     opt:
       - paths=source_relative
       - require_unimplemented_servers=false
       - Magynio/api/threads/v1/threads.proto=github.com/agynio/threads/gen/go/agynio/api/threads/v1
       - Magynio/api/notifications/v1/notifications.proto=github.com/agynio/threads/gen/go/agynio/api/notifications/v1
+      - Magynio/api/identity/v1/identity.proto=github.com/agynio/threads/gen/go/agynio/api/identity/v1
+      - Magynio/api/authorization/v1/authorization.proto=github.com/agynio/threads/gen/go/agynio/api/authorization/v1
+    include_imports: true
