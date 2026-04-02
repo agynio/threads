@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	authorizationv1 "github.com/agynio/threads/gen/go/agynio/api/authorization/v1"
-	identityv1 "github.com/agynio/threads/gen/go/agynio/api/identity/v1"
-	threadsv1 "github.com/agynio/threads/gen/go/agynio/api/threads/v1"
+	authorizationv1 "github.com/agynio/threads/.gen/go/agynio/api/authorization/v1"
+	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
+	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
