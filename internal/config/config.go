@@ -25,15 +25,15 @@ func FromEnv() (Config, error) {
 	}
 	cfg.NotificationsAddress = os.Getenv("NOTIFICATIONS_ADDRESS")
 	if cfg.NotificationsAddress == "" {
-		return Config{}, fmt.Errorf("NOTIFICATIONS_ADDRESS must be set")
+		cfg.NotificationsAddress = "notifications:50051"
 	}
 	cfg.IdentityAddress = os.Getenv("IDENTITY_ADDRESS")
 	if cfg.IdentityAddress == "" {
-		return Config{}, fmt.Errorf("IDENTITY_ADDRESS must be set")
+		cfg.IdentityAddress = "identity:50051"
 	}
 	cfg.AuthorizationAddress = os.Getenv("AUTHORIZATION_ADDRESS")
 	if cfg.AuthorizationAddress == "" {
-		return Config{}, fmt.Errorf("AUTHORIZATION_ADDRESS must be set")
+		cfg.AuthorizationAddress = "authorization:50051"
 	}
 	return cfg, nil
 }
