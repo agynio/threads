@@ -39,8 +39,8 @@ WORKDIR /app
 
 COPY --from=build /out/threads /app/threads
 
-RUN addgroup -S app && adduser -S app -G app
+RUN addgroup -g 65532 -S app && adduser -u 65532 -S app -G app
 
-USER app
+USER 65532
 
 ENTRYPOINT ["/app/threads"]
