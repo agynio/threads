@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	notificationsv1 "github.com/agynio/threads/gen/go/agynio/api/notifications/v1"
+	notificationsv1 "github.com/agynio/threads/.gen/go/agynio/api/notifications/v1"
 )
 
 const (
