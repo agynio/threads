@@ -75,11 +75,11 @@ env:
   - name: DATABASE_URL
     value: ""
   - name: NOTIFICATIONS_ADDRESS
-    value: ""
+    value: "notifications:50051"
   - name: IDENTITY_ADDRESS
-    value: ""
+    value: "identity:50051"
   - name: AUTHORIZATION_ADDRESS
-    value: ""
+    value: "authorization:50051"
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""
