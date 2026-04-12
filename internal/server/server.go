@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 
+	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -16,12 +18,28 @@ import (
 
 type Server struct {
 	threadsv1.UnimplementedThreadsServiceServer
-	store    *store.Store
+	store    threadStore
 	notifier *notifier.Notifier
+	identity identityResolver
 }
 
-func New(store *store.Store, notifier *notifier.Notifier) *Server {
-	return &Server{store: store, notifier: notifier}
+type threadStore interface {
+	CreateThread(ctx context.Context, participantIDs []uuid.UUID) (store.Thread, error)
+	ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
+	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
+	ListThreads(ctx context.Context, participantID uuid.UUID, pageSize int32, cursor *store.ThreadCursor) (store.ThreadListResult, error)
+	ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
+	ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
+	AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
+}
+
+type identityResolver interface {
+	ResolveNickname(ctx context.Context, in *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
+}
+
+func New(store threadStore, notifier *notifier.Notifier, identity identityResolver) *Server {
+	return &Server{store: store, notifier: notifier, identity: identity}
 }
 
 func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRequest) (*threadsv1.CreateThreadResponse, error) {
@@ -67,11 +85,11 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
 	}
-	participantID, err := parseUUID(req.GetParticipantId())
+	participantID, err := s.resolveParticipantID(ctx, req)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
+		return nil, err
 	}
-	thread, err := s.store.AddParticipant(ctx, threadID, participantID)
+	thread, err := s.store.AddParticipant(ctx, threadID, participantID, req.GetPassive())
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -184,6 +202,14 @@ func (s *Server) GetUnackedMessages(ctx context.Context, req *threadsv1.GetUnack
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
 	}
+	var threadID *uuid.UUID
+	if req.ThreadId != nil {
+		parsedID, err := parseUUID(req.GetThreadId())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
+		}
+		threadID = &parsedID
+	}
 	var cursor *store.MessageCursor
 	if token := req.GetPageToken(); token != "" {
 		tokenID, tokenCursor, err := store.DecodeUnackedMessagePageToken(token)
@@ -196,7 +222,7 @@ func (s *Server) GetUnackedMessages(ctx context.Context, req *threadsv1.GetUnack
 		cursor = &tokenCursor
 	}
 
-	result, err := s.store.ListUnackedMessages(ctx, participantID, req.GetPageSize(), cursor)
+	result, err := s.store.ListUnackedMessages(ctx, participantID, threadID, req.GetPageSize(), cursor)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -236,6 +262,53 @@ func (s *Server) AckMessages(ctx context.Context, req *threadsv1.AckMessagesRequ
 		return nil, toStatusError(err)
 	}
 	return &threadsv1.AckMessagesResponse{AckedCount: count}, nil
+}
+
+func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddParticipantRequest) (uuid.UUID, error) {
+	if req.GetParticipant() == nil {
+		participantID, err := parseUUID(req.GetParticipantId())
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
+		}
+		return participantID, nil
+	}
+	identifier := req.GetParticipant().GetIdentifier()
+	switch value := identifier.(type) {
+	case *threadsv1.ParticipantIdentifier_ParticipantId:
+		participantID, err := parseUUID(value.ParticipantId)
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "participant.participant_id: %v", err)
+		}
+		return participantID, nil
+	case *threadsv1.ParticipantIdentifier_ParticipantNickname:
+		if req.OrganizationId == nil {
+			return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant_nickname")
+		}
+		if value.ParticipantNickname == "" {
+			return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
+		}
+		organizationID, err := parseUUID(req.GetOrganizationId())
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
+		}
+		if s.identity == nil {
+			return uuid.UUID{}, status.Error(codes.Internal, "identity client is unavailable")
+		}
+		response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
+			OrganizationId: organizationID.String(),
+			Nickname:       value.ParticipantNickname,
+		})
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.Internal, "resolve nickname: %v", err)
+		}
+		participantID, err := parseUUID(response.GetIdentityId())
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.Internal, "resolve nickname identity_id: %v", err)
+		}
+		return participantID, nil
+	default:
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
+	}
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

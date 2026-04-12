@@ -41,6 +41,7 @@ type Thread struct {
 type Participant struct {
 	ID       uuid.UUID
 	JoinedAt time.Time
+	Passive  bool
 }
 
 type Message struct {

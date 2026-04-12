@@ -84,7 +84,7 @@ func loadThread(ctx context.Context, q queryer, id uuid.UUID) (Thread, error) {
 }
 
 func loadParticipants(ctx context.Context, q queryer, threadID uuid.UUID) ([]Participant, error) {
-	rows, err := q.Query(ctx, `SELECT participant_id, joined_at FROM thread_participants WHERE thread_id = $1 ORDER BY joined_at ASC, participant_id ASC`, threadID)
+	rows, err := q.Query(ctx, `SELECT participant_id, joined_at, passive FROM thread_participants WHERE thread_id = $1 ORDER BY joined_at ASC, participant_id ASC`, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func loadParticipants(ctx context.Context, q queryer, threadID uuid.UUID) ([]Par
 	participants := []Participant{}
 	for rows.Next() {
 		var participant Participant
-		if err := rows.Scan(&participant.ID, &participant.JoinedAt); err != nil {
+		if err := rows.Scan(&participant.ID, &participant.JoinedAt, &participant.Passive); err != nil {
 			return nil, err
 		}
 		participants = append(participants, participant)

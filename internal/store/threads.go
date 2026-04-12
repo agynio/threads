@@ -21,10 +21,10 @@ func (s *Store) CreateThread(ctx context.Context, participantIDs []uuid.UUID) (T
 		}
 		participants := make([]Participant, len(participantIDs))
 		for i, participantID := range participantIDs {
-			if _, err := tx.Exec(ctx, `INSERT INTO thread_participants (thread_id, participant_id, joined_at) VALUES ($1, $2, $3)`, threadID, participantID, now); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO thread_participants (thread_id, participant_id, joined_at, passive) VALUES ($1, $2, $3, $4)`, threadID, participantID, now, false); err != nil {
 				return err
 			}
-			participants[i] = Participant{ID: participantID, JoinedAt: now}
+			participants[i] = Participant{ID: participantID, JoinedAt: now, Passive: false}
 		}
 		thread = Thread{
 			ID:           threadID,
@@ -72,7 +72,7 @@ func (s *Store) ArchiveThread(ctx context.Context, threadID uuid.UUID) (Thread, 
 	return thread, nil
 }
 
-func (s *Store) AddParticipant(ctx context.Context, threadID, participantID uuid.UUID) (Thread, error) {
+func (s *Store) AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (Thread, error) {
 	var thread Thread
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
 		status, createdAt, updatedAt, err := loadThreadRow(ctx, tx, threadID, true)
@@ -83,7 +83,7 @@ func (s *Store) AddParticipant(ctx context.Context, threadID, participantID uuid
 			return ErrThreadArchived
 		}
 		now := time.Now().UTC()
-		cmd, err := tx.Exec(ctx, `INSERT INTO thread_participants (thread_id, participant_id, joined_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, threadID, participantID, now)
+		cmd, err := tx.Exec(ctx, `INSERT INTO thread_participants (thread_id, participant_id, joined_at, passive) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`, threadID, participantID, now, passive)
 		if err != nil {
 			return err
 		}
