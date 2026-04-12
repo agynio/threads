@@ -20,6 +20,7 @@ func toProtoThread(thread store.Thread) *threadsv1.Thread {
 			protoThread.Participants[i] = &threadsv1.Participant{
 				Id:       participant.ID.String(),
 				JoinedAt: timestamppb.New(participant.JoinedAt),
+				Passive:  participant.Passive,
 			}
 		}
 	}

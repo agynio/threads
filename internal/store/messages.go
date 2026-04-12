@@ -43,6 +43,8 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if err != nil {
 			return err
 		}
+		// Passive participants still receive message notifications; workload
+		// triggers are handled downstream.
 		if len(recipients) > 0 {
 			rows := make([][]any, len(recipients))
 			for i, recipientID := range recipients {
@@ -155,24 +157,11 @@ func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize i
 	return MessageListResult{Messages: messages, NextCursor: nextCursor}, nil
 }
 
-func (s *Store) ListUnackedMessages(ctx context.Context, participantID uuid.UUID, pageSize int32, cursor *MessageCursor) (MessageListResult, error) {
+func (s *Store) ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *MessageCursor) (MessageListResult, error) {
 	limit := normalizePageSize(pageSize)
-	query := strings.Builder{}
-	query.WriteString(`SELECT m.id, m.thread_id, m.sender_id, m.body, m.file_ids, m.created_at
-        FROM message_recipients mr
-        JOIN messages m ON m.id = mr.message_id
-        WHERE mr.participant_id = $1 AND mr.acked_at IS NULL`)
-	args := []any{participantID}
-	paramIndex := 2
-	if cursor != nil {
-		query.WriteString(fmt.Sprintf(" AND (m.created_at, m.id) > ($%d, $%d)", paramIndex, paramIndex+1))
-		args = append(args, cursor.CreatedAt, cursor.MessageID)
-		paramIndex += 2
-	}
-	query.WriteString(fmt.Sprintf(" ORDER BY m.created_at ASC, m.id ASC LIMIT $%d", paramIndex))
-	args = append(args, int(limit)+1)
+	query, args := buildUnackedMessagesQuery(participantID, threadID, cursor, limit)
 
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return MessageListResult{}, err
 	}
@@ -211,6 +200,29 @@ func (s *Store) ListUnackedMessages(ctx context.Context, participantID uuid.UUID
 		nextCursor = &MessageCursor{CreatedAt: lastTime, MessageID: lastID}
 	}
 	return MessageListResult{Messages: messages, NextCursor: nextCursor}, nil
+}
+
+func buildUnackedMessagesQuery(participantID uuid.UUID, threadID *uuid.UUID, cursor *MessageCursor, limit int32) (string, []any) {
+	query := strings.Builder{}
+	query.WriteString(`SELECT m.id, m.thread_id, m.sender_id, m.body, m.file_ids, m.created_at
+        FROM message_recipients mr
+        JOIN messages m ON m.id = mr.message_id
+        WHERE mr.participant_id = $1 AND mr.acked_at IS NULL`)
+	args := []any{participantID}
+	paramIndex := 2
+	if threadID != nil {
+		query.WriteString(fmt.Sprintf(" AND m.thread_id = $%d", paramIndex))
+		args = append(args, *threadID)
+		paramIndex++
+	}
+	if cursor != nil {
+		query.WriteString(fmt.Sprintf(" AND (m.created_at, m.id) > ($%d, $%d)", paramIndex, paramIndex+1))
+		args = append(args, cursor.CreatedAt, cursor.MessageID)
+		paramIndex += 2
+	}
+	query.WriteString(fmt.Sprintf(" ORDER BY m.created_at ASC, m.id ASC LIMIT $%d", paramIndex))
+	args = append(args, int(limit)+1)
+	return query.String(), args
 }
 
 func (s *Store) AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error) {

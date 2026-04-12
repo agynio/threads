@@ -1,0 +1,2 @@
+ALTER TABLE thread_participants
+    ADD COLUMN passive BOOLEAN NOT NULL DEFAULT FALSE;

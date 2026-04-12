@@ -76,6 +76,8 @@ env:
     value: ""
   - name: NOTIFICATIONS_ADDRESS
     value: ""
+  - name: IDENTITY_ADDRESS
+    value: ""
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""

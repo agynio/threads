@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	notificationsv1 "github.com/agynio/threads/.gen/go/agynio/api/notifications/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,10 +59,20 @@ func run() error {
 	}
 	defer notificationsConn.Close()
 
+	identityConn, err := grpc.DialContext(ctx, cfg.IdentityAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial identity: %w", err)
+	}
+	defer identityConn.Close()
+
 	threadsServer := grpc.NewServer()
 	threadsv1.RegisterThreadsServiceServer(
 		threadsServer,
-		server.New(store.NewStore(pool), notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn))),
+		server.New(
+			store.NewStore(pool),
+			notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn)),
+			identityv1.NewIdentityServiceClient(identityConn),
+		),
 	)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
