@@ -12,14 +12,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/agynio/threads/internal/notifier"
 	"github.com/agynio/threads/internal/store"
 )
 
 type Server struct {
 	threadsv1.UnimplementedThreadsServiceServer
 	store    threadStore
-	notifier *notifier.Notifier
+	notifier notifierPublisher
 	identity identityResolver
 }
 
@@ -38,7 +37,11 @@ type identityResolver interface {
 	ResolveNickname(ctx context.Context, in *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
 }
 
-func New(store threadStore, notifier *notifier.Notifier, identity identityResolver) *Server {
+type notifierPublisher interface {
+	PublishMessageCreated(ctx context.Context, threadID, messageID uuid.UUID, recipients []uuid.UUID) error
+}
+
+func New(store threadStore, notifier notifierPublisher, identity identityResolver) *Server {
 	return &Server{store: store, notifier: notifier, identity: identity}
 }
 
@@ -290,9 +293,6 @@ func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddPar
 		organizationID, err := parseUUID(req.GetOrganizationId())
 		if err != nil {
 			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
-		}
-		if s.identity == nil {
-			return uuid.UUID{}, status.Error(codes.Internal, "identity client is unavailable")
 		}
 		response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
 			OrganizationId: organizationID.String(),

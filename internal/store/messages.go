@@ -43,6 +43,8 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if err != nil {
 			return err
 		}
+		// Passive participants still receive message notifications; workload
+		// triggers are handled downstream.
 		if len(recipients) > 0 {
 			rows := make([][]any, len(recipients))
 			for i, recipientID := range recipients {
