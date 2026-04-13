@@ -78,6 +78,8 @@ env:
     value: ""
   - name: IDENTITY_ADDRESS
     value: ""
+  - name: METERING_SERVICE_ADDRESS
+    value: ""
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""
