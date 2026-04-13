@@ -127,7 +127,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub)
+	srv := New(storeStub, nil, identityStub, nil)
 	orgIDValue := organizationID.String()
 	resp, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId:       threadID.String(),
@@ -176,7 +176,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil)
+	srv := New(storeStub, nil, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{
@@ -210,7 +210,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil)
+	srv := New(storeStub, nil, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId:      threadID.String(),
 		ParticipantId: participantID.String(),
@@ -226,7 +226,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 func TestAddParticipantNicknameRequiresOrganizationID(t *testing.T) {
 	threadID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t})
+	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{

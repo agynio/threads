@@ -6,10 +6,11 @@ import (
 )
 
 type Config struct {
-	GRPCAddress          string
-	DatabaseURL          string
-	NotificationsAddress string
-	IdentityAddress      string
+	GRPCAddress            string
+	DatabaseURL            string
+	NotificationsAddress   string
+	IdentityAddress        string
+	MeteringServiceAddress string
 }
 
 func FromEnv() (Config, error) {
@@ -29,6 +30,10 @@ func FromEnv() (Config, error) {
 	cfg.IdentityAddress = os.Getenv("IDENTITY_ADDRESS")
 	if cfg.IdentityAddress == "" {
 		return Config{}, fmt.Errorf("IDENTITY_ADDRESS must be set")
+	}
+	cfg.MeteringServiceAddress = os.Getenv("METERING_SERVICE_ADDRESS")
+	if cfg.MeteringServiceAddress == "" {
+		return Config{}, fmt.Errorf("METERING_SERVICE_ADDRESS must be set")
 	}
 	return cfg, nil
 }

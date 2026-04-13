@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
+	"time"
 
 	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/agynio/threads/internal/store"
@@ -20,7 +24,13 @@ type Server struct {
 	store    threadStore
 	notifier notifierPublisher
 	identity identityResolver
+	metering meteringRecorder
 }
+
+const (
+	organizationIDMetadataKey = "x-organization-id"
+	meteringTimeout           = 5 * time.Second
+)
 
 type threadStore interface {
 	CreateThread(ctx context.Context, participantIDs []uuid.UUID) (store.Thread, error)
@@ -41,8 +51,13 @@ type notifierPublisher interface {
 	PublishMessageCreated(ctx context.Context, threadID, messageID uuid.UUID, recipients []uuid.UUID) error
 }
 
-func New(store threadStore, notifier notifierPublisher, identity identityResolver) *Server {
-	return &Server{store: store, notifier: notifier, identity: identity}
+type meteringRecorder interface {
+	RecordThreadCreated(ctx context.Context, orgID, threadID uuid.UUID, createdAt time.Time) error
+	RecordMessageSent(ctx context.Context, orgID, threadID, messageID uuid.UUID, createdAt time.Time) error
+}
+
+func New(store threadStore, notifier notifierPublisher, identity identityResolver, metering meteringRecorder) *Server {
+	return &Server{store: store, notifier: notifier, identity: identity, metering: metering}
 }
 
 func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRequest) (*threadsv1.CreateThreadResponse, error) {
@@ -68,6 +83,7 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 	if err != nil {
 		return nil, toStatusError(err)
 	}
+	s.recordThreadCreated(ctx, thread)
 	return &threadsv1.CreateThreadResponse{Thread: toProtoThread(thread)}, nil
 }
 
@@ -124,6 +140,7 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 	if err != nil {
 		return nil, toStatusError(err)
 	}
+	s.recordMessageSent(ctx, result.Message)
 	if err := s.notifier.PublishMessageCreated(ctx, threadID, result.Message.ID, result.Recipients); err != nil {
 		return nil, status.Errorf(codes.Internal, "notify recipients: %v", err)
 	}
@@ -267,6 +284,44 @@ func (s *Server) AckMessages(ctx context.Context, req *threadsv1.AckMessagesRequ
 	return &threadsv1.AckMessagesResponse{AckedCount: count}, nil
 }
 
+func (s *Server) recordThreadCreated(ctx context.Context, thread store.Thread) {
+	threadID := thread.ID
+	createdAt := thread.CreatedAt
+	s.recordUsageAsync(ctx, "thread_created", func(recordCtx context.Context, orgID uuid.UUID) error {
+		return s.metering.RecordThreadCreated(recordCtx, orgID, threadID, createdAt)
+	})
+}
+
+func (s *Server) recordMessageSent(ctx context.Context, message store.Message) {
+	messageID := message.ID
+	threadID := message.ThreadID
+	createdAt := message.CreatedAt
+	s.recordUsageAsync(ctx, "message_sent", func(recordCtx context.Context, orgID uuid.UUID) error {
+		return s.metering.RecordMessageSent(recordCtx, orgID, threadID, messageID, createdAt)
+	})
+}
+
+func (s *Server) recordUsageAsync(ctx context.Context, label string, record func(context.Context, uuid.UUID) error) {
+	if s.metering == nil {
+		return
+	}
+	orgID, ok, err := organizationIDFromContext(ctx)
+	if err != nil {
+		log.Printf("metering: %s: %v", label, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	go func() {
+		recordCtx, cancel := context.WithTimeout(context.Background(), meteringTimeout)
+		defer cancel()
+		if err := record(recordCtx, orgID); err != nil {
+			log.Printf("metering: %s: %v", label, err)
+		}
+	}()
+}
+
 func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddParticipantRequest) (uuid.UUID, error) {
 	if req.GetParticipant() == nil {
 		participantID, err := parseUUID(req.GetParticipantId())
@@ -309,6 +364,26 @@ func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddPar
 	default:
 		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
 	}
+}
+
+func organizationIDFromContext(ctx context.Context) (uuid.UUID, bool, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return uuid.UUID{}, false, nil
+	}
+	values := md.Get(organizationIDMetadataKey)
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		orgID, err := parseUUID(trimmed)
+		if err != nil {
+			return uuid.UUID{}, false, fmt.Errorf("organization_id: %w", err)
+		}
+		return orgID, true, nil
+	}
+	return uuid.UUID{}, false, nil
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

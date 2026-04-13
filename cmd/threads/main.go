@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
+	meteringv1 "github.com/agynio/threads/.gen/go/agynio/api/metering/v1"
 	notificationsv1 "github.com/agynio/threads/.gen/go/agynio/api/notifications/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/agynio/threads/internal/config"
 	"github.com/agynio/threads/internal/db"
+	"github.com/agynio/threads/internal/metering"
 	"github.com/agynio/threads/internal/notifier"
 	"github.com/agynio/threads/internal/server"
 	"github.com/agynio/threads/internal/store"
@@ -65,6 +67,12 @@ func run() error {
 	}
 	defer identityConn.Close()
 
+	meteringConn, err := grpc.DialContext(ctx, cfg.MeteringServiceAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial metering: %w", err)
+	}
+	defer meteringConn.Close()
+
 	threadsServer := grpc.NewServer()
 	threadsv1.RegisterThreadsServiceServer(
 		threadsServer,
@@ -72,6 +80,7 @@ func run() error {
 			store.NewStore(pool),
 			notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn)),
 			identityv1.NewIdentityServiceClient(identityConn),
+			metering.New(meteringv1.NewMeteringServiceClient(meteringConn)),
 		),
 	)
 
