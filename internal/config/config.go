@@ -25,15 +25,15 @@ func FromEnv() (Config, error) {
 	}
 	cfg.NotificationsAddress = os.Getenv("NOTIFICATIONS_ADDRESS")
 	if cfg.NotificationsAddress == "" {
-		return Config{}, fmt.Errorf("NOTIFICATIONS_ADDRESS must be set")
+		cfg.NotificationsAddress = "notifications:50051"
 	}
 	cfg.IdentityAddress = os.Getenv("IDENTITY_ADDRESS")
 	if cfg.IdentityAddress == "" {
-		return Config{}, fmt.Errorf("IDENTITY_ADDRESS must be set")
+		cfg.IdentityAddress = "identity:50051"
 	}
 	cfg.MeteringServiceAddress = os.Getenv("METERING_SERVICE_ADDRESS")
 	if cfg.MeteringServiceAddress == "" {
-		return Config{}, fmt.Errorf("METERING_SERVICE_ADDRESS must be set")
+		cfg.MeteringServiceAddress = "metering:50051"
 	}
 	return cfg, nil
 }
