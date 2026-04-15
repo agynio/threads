@@ -323,13 +323,6 @@ func (s *Server) recordUsageAsync(ctx context.Context, label string, record func
 }
 
 func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddParticipantRequest) (uuid.UUID, error) {
-	if req.GetParticipantIdentifier() != "" {
-		identifier := strings.TrimSpace(req.GetParticipantIdentifier())
-		if identifier == "" {
-			return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant_identifier must be provided")
-		}
-		return s.resolveParticipantIdentifier(ctx, req, identifier, "participant_identifier", strings.HasPrefix(identifier, "@"))
-	}
 	if req.GetParticipant() != nil {
 		identifier := req.GetParticipant().GetIdentifier()
 		switch value := identifier.(type) {
@@ -340,7 +333,7 @@ func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddPar
 			}
 			return participantID, nil
 		case *threadsv1.ParticipantIdentifier_ParticipantNickname:
-			return s.resolveParticipantIdentifier(ctx, req, value.ParticipantNickname, "participant.participant_nickname", true)
+			return s.resolveParticipantNickname(ctx, req, value.ParticipantNickname)
 		default:
 			return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
 		}
@@ -352,31 +345,24 @@ func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddPar
 		}
 		return participantID, nil
 	}
-	return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant_identifier must be provided")
+	return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
 }
 
-func (s *Server) resolveParticipantIdentifier(ctx context.Context, req *threadsv1.AddParticipantRequest, identifier, fieldName string, isNickname bool) (uuid.UUID, error) {
-	trimmed := strings.TrimSpace(identifier)
+func (s *Server) resolveParticipantNickname(ctx context.Context, req *threadsv1.AddParticipantRequest, nickname string) (uuid.UUID, error) {
+	trimmed := strings.TrimSpace(nickname)
 	if trimmed == "" {
-		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s must be provided", fieldName)
-	}
-	if !isNickname {
-		participantID, err := parseUUID(trimmed)
-		if err != nil {
-			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s: %v", fieldName, err)
-		}
-		return participantID, nil
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
 	}
 	cleaned := strings.TrimPrefix(trimmed, "@")
 	if cleaned == "" {
-		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s: nickname must be provided", fieldName)
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
 	}
 	organizationID, ok, err := organizationIDForNickname(ctx, req)
 	if err != nil {
 		return uuid.UUID{}, err
 	}
 	if !ok {
-		return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant identifier")
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant_nickname")
 	}
 	response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
 		OrganizationId: organizationID.String(),

@@ -131,10 +131,12 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 	srv := New(storeStub, nil, identityStub, nil)
 	orgIDValue := organizationID.String()
 	resp, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
-		ThreadId:              threadID.String(),
-		OrganizationId:        &orgIDValue,
-		Passive:               true,
-		ParticipantIdentifier: "@agent-alpha",
+		ThreadId:       threadID.String(),
+		OrganizationId: &orgIDValue,
+		Passive:        true,
+		Participant: &threadsv1.ParticipantIdentifier{
+			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-alpha"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("AddParticipant returned error: %v", err)
@@ -153,7 +155,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 	}
 }
 
-func TestAddParticipantWithParticipantIdentifierUUID(t *testing.T) {
+func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 	threadID := uuid.New()
 	participantID := uuid.New()
 	storeCalled := false
@@ -170,38 +172,6 @@ func TestAddParticipantWithParticipantIdentifierUUID(t *testing.T) {
 			}
 			if passive {
 				t.Fatalf("expected passive false, got %v", passive)
-			}
-			return store.Thread{ID: threadID}, nil
-		},
-	}
-
-	srv := New(storeStub, nil, nil, nil)
-	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
-		ThreadId:              threadID.String(),
-		ParticipantIdentifier: participantID.String(),
-	})
-	if err != nil {
-		t.Fatalf("AddParticipant returned error: %v", err)
-	}
-	if !storeCalled {
-		t.Fatal("expected AddParticipant to be called")
-	}
-}
-
-func TestAddParticipantWithDeprecatedParticipantOneof(t *testing.T) {
-	threadID := uuid.New()
-	participantID := uuid.New()
-	storeCalled := false
-
-	storeStub := &stubThreadStore{
-		t: t,
-		addParticipantFn: func(ctx context.Context, threadArg, participantArg uuid.UUID, passive bool) (store.Thread, error) {
-			storeCalled = true
-			if threadArg != threadID {
-				t.Fatalf("expected thread ID %s, got %s", threadID, threadArg)
-			}
-			if participantArg != participantID {
-				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
 			return store.Thread{ID: threadID}, nil
 		},
@@ -259,8 +229,10 @@ func TestAddParticipantNicknameRequiresOrganizationID(t *testing.T) {
 
 	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
-		ThreadId:              threadID.String(),
-		ParticipantIdentifier: "@agent-alpha",
+		ThreadId: threadID.String(),
+		Participant: &threadsv1.ParticipantIdentifier{
+			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-alpha"},
+		},
 	})
 	if err == nil {
 		t.Fatal("expected error")
@@ -271,6 +243,9 @@ func TestAddParticipantNicknameRequiresOrganizationID(t *testing.T) {
 	}
 	if st.Code() != codes.InvalidArgument {
 		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
+	}
+	if st.Message() != "organization_id must be provided for participant_nickname" {
+		t.Fatalf("expected organization_id error, got %s", st.Message())
 	}
 }
 
@@ -311,8 +286,10 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 	srv := New(storeStub, nil, identityStub, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
-		ThreadId:              threadID.String(),
-		ParticipantIdentifier: "@agent-beta",
+		ThreadId: threadID.String(),
+		Participant: &threadsv1.ParticipantIdentifier{
+			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-beta"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("AddParticipant returned error: %v", err)
