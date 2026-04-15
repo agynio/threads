@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	agentsv1 "github.com/agynio/threads/.gen/go/agynio/api/agents/v1"
 	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
@@ -82,6 +83,19 @@ func (s *stubIdentityResolver) ResolveNickname(ctx context.Context, req *identit
 	return s.resolveFn(ctx, req, opts...)
 }
 
+type stubAgentsService struct {
+	t          *testing.T
+	getAgentFn func(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error)
+}
+
+func (s *stubAgentsService) GetAgent(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error) {
+	s.t.Helper()
+	if s.getAgentFn == nil {
+		s.t.Fatalf("unexpected GetAgent call")
+	}
+	return s.getAgentFn(ctx, req, opts...)
+}
+
 func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 	threadID := uuid.New()
 	organizationID := uuid.New()
@@ -128,9 +142,10 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, nil)
+	srv := New(storeStub, nil, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
-	resp, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", uuid.New().String()))
+	resp, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId:       threadID.String(),
 		OrganizationId: &orgIDValue,
 		Passive:        true,
@@ -177,7 +192,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{
@@ -211,7 +226,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId:      threadID.String(),
 		ParticipantId: participantID.String(),
@@ -227,7 +242,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 func TestAddParticipantNicknameRequiresOrganizationID(t *testing.T) {
 	threadID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil)
+	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{
@@ -283,7 +298,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, nil)
+	srv := New(storeStub, nil, identityStub, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
@@ -299,5 +314,181 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 	}
 	if !identityCalled {
 		t.Fatal("expected ResolveNickname to be called")
+	}
+}
+
+func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
+	threadID := uuid.New()
+	organizationID := uuid.New()
+	agentID := uuid.New()
+	participantID := uuid.New()
+	storeCalled := false
+	identityCalled := false
+	agentCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		addParticipantFn: func(ctx context.Context, threadArg, participantArg uuid.UUID, passive bool) (store.Thread, error) {
+			storeCalled = true
+			if threadArg != threadID {
+				t.Fatalf("expected thread ID %s, got %s", threadID, threadArg)
+			}
+			if participantArg != participantID {
+				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
+			}
+			return store.Thread{ID: threadID}, nil
+		},
+	}
+	identityStub := &stubIdentityResolver{
+		t: t,
+		resolveFn: func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
+			identityCalled = true
+			if req.GetOrganizationId() != organizationID.String() {
+				t.Fatalf("expected organization ID %s, got %s", organizationID, req.GetOrganizationId())
+			}
+			if req.GetNickname() != "agent-gamma" {
+				t.Fatalf("expected nickname agent-gamma, got %s", req.GetNickname())
+			}
+			return &identityv1.ResolveNicknameResponse{IdentityId: participantID.String()}, nil
+		},
+	}
+	agentsStub := &stubAgentsService{
+		t: t,
+		getAgentFn: func(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error) {
+			agentCalled = true
+			if req.GetId() != agentID.String() {
+				t.Fatalf("expected agent ID %s, got %s", agentID, req.GetId())
+			}
+			return &agentsv1.GetAgentResponse{
+				Agent: &agentsv1.Agent{OrganizationId: organizationID.String()},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, identityStub, agentsStub, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+	)
+	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
+		ThreadId: threadID.String(),
+		Participant: &threadsv1.ParticipantIdentifier{
+			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-gamma"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddParticipant returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected AddParticipant to be called")
+	}
+	if !agentCalled {
+		t.Fatal("expected GetAgent to be called")
+	}
+	if !identityCalled {
+		t.Fatal("expected ResolveNickname to be called")
+	}
+}
+
+func TestAddParticipantNicknameRejectsNonAgentIdentityTypes(t *testing.T) {
+	threadID := uuid.New()
+	identityID := uuid.New()
+	identityTypes := []string{"user", "runner", "app"}
+
+	for _, identityType := range identityTypes {
+		t.Run(identityType, func(t *testing.T) {
+			srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil, nil)
+			ctx := metadata.NewIncomingContext(
+				context.Background(),
+				metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", identityType),
+			)
+			_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
+				ThreadId: threadID.String(),
+				Participant: &threadsv1.ParticipantIdentifier{
+					Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent"},
+				},
+			})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			st, ok := status.FromError(err)
+			if !ok {
+				t.Fatalf("expected gRPC status error, got %v", err)
+			}
+			if st.Code() != codes.InvalidArgument {
+				t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
+			}
+			if st.Message() != "organization_id must be provided for participant_nickname" {
+				t.Fatalf("expected organization_id error, got %s", st.Message())
+			}
+		})
+	}
+}
+
+func TestAddParticipantNicknameAgentLookupError(t *testing.T) {
+	threadID := uuid.New()
+	agentID := uuid.New()
+
+	agentsStub := &stubAgentsService{
+		t: t,
+		getAgentFn: func(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error) {
+			return nil, status.Error(codes.Internal, "agent down")
+		},
+	}
+
+	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+	)
+	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
+		ThreadId: threadID.String(),
+		Participant: &threadsv1.ParticipantIdentifier{
+			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.Internal {
+		t.Fatalf("expected Internal, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
+	threadID := uuid.New()
+	agentID := uuid.New()
+
+	agentsStub := &stubAgentsService{
+		t: t,
+		getAgentFn: func(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error) {
+			return &agentsv1.GetAgentResponse{Agent: &agentsv1.Agent{}}, nil
+		},
+	}
+
+	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+	)
+	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
+		ThreadId: threadID.String(),
+		Participant: &threadsv1.ParticipantIdentifier{
+			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.Internal {
+		t.Fatalf("expected Internal, got %s: %s", st.Code(), st.Message())
 	}
 }

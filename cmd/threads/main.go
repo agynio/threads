@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	agentsv1 "github.com/agynio/threads/.gen/go/agynio/api/agents/v1"
 	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	meteringv1 "github.com/agynio/threads/.gen/go/agynio/api/metering/v1"
 	notificationsv1 "github.com/agynio/threads/.gen/go/agynio/api/notifications/v1"
@@ -67,6 +68,12 @@ func run() error {
 	}
 	defer identityConn.Close()
 
+	agentsConn, err := grpc.DialContext(ctx, cfg.AgentsServiceAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial agents: %w", err)
+	}
+	defer agentsConn.Close()
+
 	meteringConn, err := grpc.DialContext(ctx, cfg.MeteringServiceAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("dial metering: %w", err)
@@ -80,6 +87,7 @@ func run() error {
 			store.NewStore(pool),
 			notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn)),
 			identityv1.NewIdentityServiceClient(identityConn),
+			agentsv1.NewAgentsServiceClient(agentsConn),
 			metering.New(meteringv1.NewMeteringServiceClient(meteringConn)),
 		),
 	)
