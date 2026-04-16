@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (s *Store) CreateThread(ctx context.Context, participantIDs []uuid.UUID) (Thread, error) {
+func (s *Store) CreateThread(ctx context.Context, participantInputs []ParticipantInput) (Thread, error) {
 	var thread Thread
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
 		threadID := uuid.New()
@@ -19,12 +19,12 @@ func (s *Store) CreateThread(ctx context.Context, participantIDs []uuid.UUID) (T
 		if _, err := tx.Exec(ctx, `INSERT INTO threads (id, status, created_at, updated_at) VALUES ($1, $2, $3, $3)`, threadID, int16(ThreadStatusActive), now); err != nil {
 			return err
 		}
-		participants := make([]Participant, len(participantIDs))
-		for i, participantID := range participantIDs {
-			if _, err := tx.Exec(ctx, `INSERT INTO thread_participants (thread_id, participant_id, joined_at, passive) VALUES ($1, $2, $3, $4)`, threadID, participantID, now, false); err != nil {
+		participants := make([]Participant, len(participantInputs))
+		for i, participant := range participantInputs {
+			if _, err := tx.Exec(ctx, `INSERT INTO thread_participants (thread_id, participant_id, joined_at, passive) VALUES ($1, $2, $3, $4)`, threadID, participant.ID, now, participant.Passive); err != nil {
 				return err
 			}
-			participants[i] = Participant{ID: participantID, JoinedAt: now, Passive: false}
+			participants[i] = Participant{ID: participant.ID, JoinedAt: now, Passive: participant.Passive}
 		}
 		thread = Thread{
 			ID:           threadID,

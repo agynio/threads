@@ -19,6 +19,7 @@ import (
 
 type stubThreadStore struct {
 	t                *testing.T
+	createThreadFn   func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error)
 	addParticipantFn func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
 }
 
@@ -27,9 +28,12 @@ func (s *stubThreadStore) unexpectedCall(method string) {
 	s.t.Fatalf("unexpected %s call", method)
 }
 
-func (s *stubThreadStore) CreateThread(context.Context, []uuid.UUID) (store.Thread, error) {
-	s.unexpectedCall("CreateThread")
-	return store.Thread{}, nil
+func (s *stubThreadStore) CreateThread(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+	s.t.Helper()
+	if s.createThreadFn == nil {
+		s.t.Fatalf("unexpected CreateThread call")
+	}
+	return s.createThreadFn(ctx, participants)
 }
 
 func (s *stubThreadStore) ArchiveThread(context.Context, uuid.UUID) (store.Thread, error) {
@@ -94,6 +98,162 @@ func (s *stubAgentsService) GetAgent(ctx context.Context, req *agentsv1.GetAgent
 		s.t.Fatalf("unexpected GetAgent call")
 	}
 	return s.getAgentFn(ctx, req, opts...)
+}
+
+func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
+	threadID := uuid.New()
+	agentID := uuid.New()
+	participantID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+			storeCalled = true
+			if len(participants) != 2 {
+				t.Fatalf("expected 2 participants, got %d", len(participants))
+			}
+			agentInput := findParticipantInput(participants, agentID)
+			if agentInput == nil {
+				t.Fatalf("expected agent participant %s", agentID)
+			}
+			if !agentInput.Passive {
+				t.Fatalf("expected agent passive true")
+			}
+			participantInput := findParticipantInput(participants, participantID)
+			if participantInput == nil {
+				t.Fatalf("expected participant %s", participantID)
+			}
+			if participantInput.Passive {
+				t.Fatalf("expected participant passive false")
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Participants: []store.Participant{
+					{ID: agentID, JoinedAt: now, Passive: true},
+					{ID: participantID, JoinedAt: now, Passive: false},
+				},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+	)
+	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{agentID.String(), participantID.String()}})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected CreateThread to be called")
+	}
+	agentParticipant := findProtoParticipant(resp.GetThread(), agentID)
+	if agentParticipant == nil {
+		t.Fatal("expected agent participant in response")
+	}
+	if !agentParticipant.GetPassive() {
+		t.Fatal("expected agent participant passive true")
+	}
+}
+
+func TestCreateThreadUserInitiatorActive(t *testing.T) {
+	threadID := uuid.New()
+	userID := uuid.New()
+	participantID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+			storeCalled = true
+			for _, participant := range participants {
+				if participant.Passive {
+					t.Fatalf("expected passive false for participant %s", participant.ID)
+				}
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Participants: []store.Participant{
+					{ID: userID, JoinedAt: now, Passive: false},
+					{ID: participantID, JoinedAt: now, Passive: false},
+				},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", userID.String(), "x-identity-type", "user"),
+	)
+	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{userID.String(), participantID.String()}})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected CreateThread to be called")
+	}
+	userParticipant := findProtoParticipant(resp.GetThread(), userID)
+	if userParticipant == nil {
+		t.Fatal("expected user participant in response")
+	}
+	if userParticipant.GetPassive() {
+		t.Fatal("expected user participant passive false")
+	}
+}
+
+func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
+	threadID := uuid.New()
+	participantID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+			storeCalled = true
+			for _, participant := range participants {
+				if participant.Passive {
+					t.Fatalf("expected passive false for participant %s", participant.ID)
+				}
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Participants: []store.Participant{
+					{ID: participantID, JoinedAt: now, Passive: false},
+				},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil)
+	resp, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{ParticipantIds: []string{participantID.String()}})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected CreateThread to be called")
+	}
+	participant := findProtoParticipant(resp.GetThread(), participantID)
+	if participant == nil {
+		t.Fatal("expected participant in response")
+	}
+	if participant.GetPassive() {
+		t.Fatal("expected participant passive false")
+	}
 }
 
 func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
@@ -491,4 +651,26 @@ func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
 	if st.Code() != codes.Internal {
 		t.Fatalf("expected Internal, got %s: %s", st.Code(), st.Message())
 	}
+}
+
+func findParticipantInput(participants []store.ParticipantInput, id uuid.UUID) *store.ParticipantInput {
+	for i := range participants {
+		if participants[i].ID == id {
+			return &participants[i]
+		}
+	}
+	return nil
+}
+
+func findProtoParticipant(thread *threadsv1.Thread, id uuid.UUID) *threadsv1.Participant {
+	if thread == nil {
+		return nil
+	}
+	value := id.String()
+	for _, participant := range thread.GetParticipants() {
+		if participant.GetId() == value {
+			return participant
+		}
+	}
+	return nil
 }

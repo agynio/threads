@@ -44,6 +44,11 @@ type Participant struct {
 	Passive  bool
 }
 
+type ParticipantInput struct {
+	ID      uuid.UUID
+	Passive bool
+}
+
 type Message struct {
 	ID        uuid.UUID
 	ThreadID  uuid.UUID
