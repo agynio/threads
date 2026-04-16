@@ -114,18 +114,16 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 			if len(participants) != 2 {
 				t.Fatalf("expected 2 participants, got %d", len(participants))
 			}
-			agentInput := findParticipantInput(participants, agentID)
-			if agentInput == nil {
-				t.Fatalf("expected agent participant %s", agentID)
+			if participants[0].ID != agentID {
+				t.Fatalf("expected initiator %s first, got %s", agentID, participants[0].ID)
 			}
-			if !agentInput.Passive {
+			if !participants[0].Passive {
 				t.Fatalf("expected agent passive true")
 			}
-			participantInput := findParticipantInput(participants, participantID)
-			if participantInput == nil {
-				t.Fatalf("expected participant %s", participantID)
+			if participants[1].ID != participantID {
+				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
 			}
-			if participantInput.Passive {
+			if participants[1].Passive {
 				t.Fatalf("expected participant passive false")
 			}
 			return store.Thread{
@@ -146,7 +144,7 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
 	)
-	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{agentID.String(), participantID.String()}})
+	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{participantID.String()}})
 	if err != nil {
 		t.Fatalf("CreateThread returned error: %v", err)
 	}
@@ -173,10 +171,20 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 		t: t,
 		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
-			for _, participant := range participants {
-				if participant.Passive {
-					t.Fatalf("expected passive false for participant %s", participant.ID)
-				}
+			if len(participants) != 2 {
+				t.Fatalf("expected 2 participants, got %d", len(participants))
+			}
+			if participants[0].ID != userID {
+				t.Fatalf("expected initiator %s first, got %s", userID, participants[0].ID)
+			}
+			if participants[0].Passive {
+				t.Fatalf("expected initiator passive false")
+			}
+			if participants[1].ID != participantID {
+				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
+			}
+			if participants[1].Passive {
+				t.Fatalf("expected participant passive false")
 			}
 			return store.Thread{
 				ID:        threadID,
@@ -196,7 +204,7 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 		context.Background(),
 		metadata.Pairs("x-identity-id", userID.String(), "x-identity-type", "user"),
 	)
-	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{userID.String(), participantID.String()}})
+	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{participantID.String()}})
 	if err != nil {
 		t.Fatalf("CreateThread returned error: %v", err)
 	}
@@ -222,10 +230,14 @@ func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 		t: t,
 		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
-			for _, participant := range participants {
-				if participant.Passive {
-					t.Fatalf("expected passive false for participant %s", participant.ID)
-				}
+			if len(participants) != 1 {
+				t.Fatalf("expected 1 participant, got %d", len(participants))
+			}
+			if participants[0].ID != participantID {
+				t.Fatalf("expected participant %s, got %s", participantID, participants[0].ID)
+			}
+			if participants[0].Passive {
+				t.Fatalf("expected participant passive false")
 			}
 			return store.Thread{
 				ID:        threadID,
@@ -253,6 +265,28 @@ func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 	}
 	if participant.GetPassive() {
 		t.Fatal("expected participant passive false")
+	}
+}
+
+func TestCreateThreadRejectsInitiatorInParticipants(t *testing.T) {
+	initiatorID := uuid.New()
+	participantID := uuid.New()
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", initiatorID.String(), "x-identity-type", "agent"),
+	)
+	_, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{initiatorID.String(), participantID.String()}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
 	}
 }
 
