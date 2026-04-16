@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	agentsv1 "github.com/agynio/threads/.gen/go/agynio/api/agents/v1"
 	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
@@ -24,11 +25,15 @@ type Server struct {
 	store    threadStore
 	notifier notifierPublisher
 	identity identityResolver
+	agents   agentsService
 	metering meteringRecorder
 }
 
 const (
 	organizationIDMetadataKey = "x-organization-id"
+	identityIDMetadataKey     = "x-identity-id"
+	identityTypeMetadataKey   = "x-identity-type"
+	agentIdentityType         = "agent"
 	meteringTimeout           = 5 * time.Second
 )
 
@@ -47,6 +52,10 @@ type identityResolver interface {
 	ResolveNickname(ctx context.Context, in *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
 }
 
+type agentsService interface {
+	GetAgent(ctx context.Context, in *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error)
+}
+
 type notifierPublisher interface {
 	PublishMessageCreated(ctx context.Context, threadID, messageID uuid.UUID, recipients []uuid.UUID) error
 }
@@ -56,8 +65,8 @@ type meteringRecorder interface {
 	RecordMessageSent(ctx context.Context, orgID, threadID, messageID uuid.UUID, createdAt time.Time) error
 }
 
-func New(store threadStore, notifier notifierPublisher, identity identityResolver, metering meteringRecorder) *Server {
-	return &Server{store: store, notifier: notifier, identity: identity, metering: metering}
+func New(store threadStore, notifier notifierPublisher, identity identityResolver, agents agentsService, metering meteringRecorder) *Server {
+	return &Server{store: store, notifier: notifier, identity: identity, agents: agents, metering: metering}
 }
 
 func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRequest) (*threadsv1.CreateThreadResponse, error) {
@@ -323,47 +332,74 @@ func (s *Server) recordUsageAsync(ctx context.Context, label string, record func
 }
 
 func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddParticipantRequest) (uuid.UUID, error) {
-	if req.GetParticipant() == nil {
-		participantID, err := parseUUID(req.GetParticipantId())
+	if req.GetParticipant() != nil {
+		identifier := req.GetParticipant().GetIdentifier()
+		switch value := identifier.(type) {
+		case *threadsv1.ParticipantIdentifier_ParticipantId:
+			participantID, err := parseUUID(strings.TrimSpace(value.ParticipantId))
+			if err != nil {
+				return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "participant.participant_id: %v", err)
+			}
+			return participantID, nil
+		case *threadsv1.ParticipantIdentifier_ParticipantNickname:
+			return s.resolveParticipantNickname(ctx, req, value.ParticipantNickname)
+		default:
+			return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
+		}
+	}
+	if req.GetParticipantId() != "" {
+		participantID, err := parseUUID(strings.TrimSpace(req.GetParticipantId()))
 		if err != nil {
 			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
 		}
 		return participantID, nil
 	}
-	identifier := req.GetParticipant().GetIdentifier()
-	switch value := identifier.(type) {
-	case *threadsv1.ParticipantIdentifier_ParticipantId:
-		participantID, err := parseUUID(value.ParticipantId)
-		if err != nil {
-			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "participant.participant_id: %v", err)
-		}
-		return participantID, nil
-	case *threadsv1.ParticipantIdentifier_ParticipantNickname:
-		if req.OrganizationId == nil {
-			return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant_nickname")
-		}
-		if value.ParticipantNickname == "" {
-			return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
-		}
-		organizationID, err := parseUUID(req.GetOrganizationId())
+	return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
+}
+
+func (s *Server) resolveParticipantNickname(ctx context.Context, req *threadsv1.AddParticipantRequest, nickname string) (uuid.UUID, error) {
+	trimmed := strings.TrimSpace(nickname)
+	if trimmed == "" {
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
+	}
+	cleaned := strings.TrimPrefix(trimmed, "@")
+	if cleaned == "" {
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
+	}
+	organizationID, err := s.organizationIDForNickname(ctx, req)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
+		OrganizationId: organizationID.String(),
+		Nickname:       cleaned,
+	})
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "resolve nickname: %v", err)
+	}
+	participantID, err := parseUUID(response.GetIdentityId())
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "resolve nickname identity_id: %v", err)
+	}
+	return participantID, nil
+}
+
+func (s *Server) organizationIDForNickname(ctx context.Context, req *threadsv1.AddParticipantRequest) (uuid.UUID, error) {
+	if req.OrganizationId != nil {
+		organizationID, err := parseUUID(strings.TrimSpace(req.GetOrganizationId()))
 		if err != nil {
 			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 		}
-		response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
-			OrganizationId: organizationID.String(),
-			Nickname:       value.ParticipantNickname,
-		})
-		if err != nil {
-			return uuid.UUID{}, status.Errorf(codes.Internal, "resolve nickname: %v", err)
-		}
-		participantID, err := parseUUID(response.GetIdentityId())
-		if err != nil {
-			return uuid.UUID{}, status.Errorf(codes.Internal, "resolve nickname identity_id: %v", err)
-		}
-		return participantID, nil
-	default:
-		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
+		return organizationID, nil
 	}
+	organizationID, ok, err := organizationIDFromContext(ctx)
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	if ok {
+		return organizationID, nil
+	}
+	return s.organizationIDFromIdentity(ctx)
 }
 
 func organizationIDFromContext(ctx context.Context) (uuid.UUID, bool, error) {
@@ -371,19 +407,62 @@ func organizationIDFromContext(ctx context.Context) (uuid.UUID, bool, error) {
 	if !ok {
 		return uuid.UUID{}, false, nil
 	}
-	values := md.Get(organizationIDMetadataKey)
+	value := metadataValue(md, organizationIDMetadataKey)
+	if value == "" {
+		return uuid.UUID{}, false, nil
+	}
+	orgID, err := parseUUID(value)
+	if err != nil {
+		return uuid.UUID{}, false, fmt.Errorf("organization_id: %w", err)
+	}
+	return orgID, true, nil
+}
+
+func (s *Server) organizationIDFromIdentity(ctx context.Context) (uuid.UUID, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant_nickname")
+	}
+	identityID := metadataValue(md, identityIDMetadataKey)
+	identityType := metadataValue(md, identityTypeMetadataKey)
+	if identityID == "" || identityType == "" {
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant_nickname")
+	}
+	if !strings.EqualFold(identityType, agentIdentityType) {
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id must be provided for participant_nickname")
+	}
+	if s.agents == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
+	}
+	response, err := s.agents.GetAgent(ctx, &agentsv1.GetAgentRequest{Id: identityID})
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent: %v", err)
+	}
+	agent := response.GetAgent()
+	if agent == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "get agent: agent missing")
+	}
+	orgIDValue := strings.TrimSpace(agent.GetOrganizationId())
+	if orgIDValue == "" {
+		return uuid.UUID{}, status.Error(codes.Internal, "get agent: organization_id missing")
+	}
+	orgID, err := parseUUID(orgIDValue)
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent organization_id: %v", err)
+	}
+	return orgID, nil
+}
+
+func metadataValue(md metadata.MD, key string) string {
+	values := md.Get(key)
 	for _, value := range values {
 		trimmed := strings.TrimSpace(value)
 		if trimmed == "" {
 			continue
 		}
-		orgID, err := parseUUID(trimmed)
-		if err != nil {
-			return uuid.UUID{}, false, fmt.Errorf("organization_id: %w", err)
-		}
-		return orgID, true, nil
+		return trimmed
 	}
-	return uuid.UUID{}, false, nil
+	return ""
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

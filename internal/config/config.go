@@ -10,6 +10,7 @@ type Config struct {
 	DatabaseURL            string
 	NotificationsAddress   string
 	IdentityAddress        string
+	AgentsServiceAddress   string
 	MeteringServiceAddress string
 }
 
@@ -30,6 +31,10 @@ func FromEnv() (Config, error) {
 	cfg.IdentityAddress = os.Getenv("IDENTITY_ADDRESS")
 	if cfg.IdentityAddress == "" {
 		cfg.IdentityAddress = "identity:50051"
+	}
+	cfg.AgentsServiceAddress = os.Getenv("AGENTS_SERVICE_ADDRESS")
+	if cfg.AgentsServiceAddress == "" {
+		cfg.AgentsServiceAddress = "agents:50051"
 	}
 	cfg.MeteringServiceAddress = os.Getenv("METERING_SERVICE_ADDRESS")
 	if cfg.MeteringServiceAddress == "" {
