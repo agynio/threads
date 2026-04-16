@@ -687,15 +687,6 @@ func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
 	}
 }
 
-func findParticipantInput(participants []store.ParticipantInput, id uuid.UUID) *store.ParticipantInput {
-	for i := range participants {
-		if participants[i].ID == id {
-			return &participants[i]
-		}
-	}
-	return nil
-}
-
 func findProtoParticipant(thread *threadsv1.Thread, id uuid.UUID) *threadsv1.Participant {
 	if thread == nil {
 		return nil
