@@ -71,7 +71,11 @@ func New(store threadStore, notifier notifierPublisher, identity identityResolve
 
 func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRequest) (*threadsv1.CreateThreadResponse, error) {
 	ids := req.GetParticipantIds()
-	if len(ids) == 0 {
+	initiator, hasInitiator, err := initiatorInfoFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 && !hasInitiator {
 		return nil, status.Error(codes.InvalidArgument, "participant_ids must be provided")
 	}
 	participantIDs := make([]uuid.UUID, len(ids))
@@ -88,10 +92,6 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 		participantIDs[i] = id
 	}
 
-	initiator, hasInitiator, err := initiatorInfoFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
 	if hasInitiator {
 		if _, ok := seen[initiator.ID]; ok {
 			return nil, status.Error(codes.InvalidArgument, "participant_ids must not include initiator")

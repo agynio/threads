@@ -160,6 +160,58 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 	}
 }
 
+func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
+	threadID := uuid.New()
+	agentID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+			storeCalled = true
+			if len(participants) != 1 {
+				t.Fatalf("expected 1 participant, got %d", len(participants))
+			}
+			if participants[0].ID != agentID {
+				t.Fatalf("expected initiator %s, got %s", agentID, participants[0].ID)
+			}
+			if !participants[0].Passive {
+				t.Fatalf("expected initiator passive true")
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Participants: []store.Participant{
+					{ID: agentID, JoinedAt: now, Passive: true},
+				},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+	)
+	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected CreateThread to be called")
+	}
+	agentParticipant := findProtoParticipant(resp.GetThread(), agentID)
+	if agentParticipant == nil {
+		t.Fatal("expected agent participant in response")
+	}
+	if !agentParticipant.GetPassive() {
+		t.Fatal("expected agent participant passive true")
+	}
+}
+
 func TestCreateThreadUserInitiatorActive(t *testing.T) {
 	threadID := uuid.New()
 	userID := uuid.New()
@@ -265,6 +317,21 @@ func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 	}
 	if participant.GetPassive() {
 		t.Fatal("expected participant passive false")
+	}
+}
+
+func TestCreateThreadMissingIdentityMetadataRejectsEmpty(t *testing.T) {
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
+	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
 	}
 }
 
