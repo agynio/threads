@@ -475,6 +475,74 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 	}
 }
 
+func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
+	threadID := uuid.New()
+	organizationID := uuid.New()
+	participantID := uuid.New()
+	nicknameID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+	identityCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+			storeCalled = true
+			if len(participants) != 2 {
+				t.Fatalf("expected 2 participants, got %d", len(participants))
+			}
+			if participants[0].ID != participantID {
+				t.Fatalf("expected participant %s first, got %s", participantID, participants[0].ID)
+			}
+			if participants[1].ID != nicknameID {
+				t.Fatalf("expected participant %s second, got %s", nicknameID, participants[1].ID)
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Participants: []store.Participant{
+					{ID: participantID, JoinedAt: now, Passive: false},
+					{ID: nicknameID, JoinedAt: now, Passive: false},
+				},
+			}, nil
+		},
+	}
+	identityStub := &stubIdentityResolver{
+		t: t,
+		resolveFn: func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
+			identityCalled = true
+			if req.GetOrganizationId() != organizationID.String() {
+				t.Fatalf("expected organization ID %s, got %s", organizationID, req.GetOrganizationId())
+			}
+			if req.GetNickname() != "agent-zeta" {
+				t.Fatalf("expected nickname agent-zeta, got %s", req.GetNickname())
+			}
+			return &identityv1.ResolveNicknameResponse{IdentityId: nicknameID.String()}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, identityStub, nil, nil)
+	orgIDValue := organizationID.String()
+	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{
+		OrganizationId: &orgIDValue,
+		Participants: []*threadsv1.ParticipantIdentifier{
+			{Identifier: &threadsv1.ParticipantIdentifier_ParticipantId{ParticipantId: participantID.String()}},
+			{Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-zeta"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected CreateThread to be called")
+	}
+	if !identityCalled {
+		t.Fatal("expected ResolveNickname to be called")
+	}
+}
+
 func TestCreateThreadMissingIdentityMetadataRejectsEmpty(t *testing.T) {
 	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
 	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{})
@@ -490,6 +558,31 @@ func TestCreateThreadMissingIdentityMetadataRejectsEmpty(t *testing.T) {
 	}
 	if st.Message() != "participant_ids or participants must be provided" {
 		t.Fatalf("expected participant error, got %s", st.Message())
+	}
+}
+
+func TestCreateThreadRejectsMixedParticipantFields(t *testing.T) {
+	participantID := uuid.New()
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
+	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{
+		ParticipantIds: []string{participantID.String()},
+		Participants: []*threadsv1.ParticipantIdentifier{
+			{Identifier: &threadsv1.ParticipantIdentifier_ParticipantId{ParticipantId: participantID.String()}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
+	}
+	if st.Message() != "participant_ids and participants are mutually exclusive" {
+		t.Fatalf("expected mutual exclusivity error, got %s", st.Message())
 	}
 }
 

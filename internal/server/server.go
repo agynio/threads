@@ -90,14 +90,9 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 			if err != nil {
 				return nil, status.Errorf(codes.InvalidArgument, "participant_ids[%d]: %v", i, err)
 			}
-			if hasInitiator && id == initiator.ID {
-				return nil, status.Error(codes.InvalidArgument, "participant_ids must not include initiator")
+			if err := addResolvedParticipant(id, initiator, hasInitiator, seen, &resolved, "participant_ids", i); err != nil {
+				return nil, err
 			}
-			if _, ok := seen[id]; ok {
-				return nil, status.Errorf(codes.InvalidArgument, "participant_ids[%d]: duplicate participant", i)
-			}
-			seen[id] = struct{}{}
-			resolved = append(resolved, store.ParticipantInput{ID: id, Passive: false})
 		}
 	}
 	if len(identifiers) > 0 {
@@ -113,14 +108,9 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 				if err != nil {
 					return nil, status.Errorf(codes.InvalidArgument, "participants[%d].participant_id: %v", i, err)
 				}
-				if hasInitiator && id == initiator.ID {
-					return nil, status.Error(codes.InvalidArgument, "participants must not include initiator")
+				if err := addResolvedParticipant(id, initiator, hasInitiator, seen, &resolved, "participants", i); err != nil {
+					return nil, err
 				}
-				if _, ok := seen[id]; ok {
-					return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: duplicate participant", i)
-				}
-				seen[id] = struct{}{}
-				resolved = append(resolved, store.ParticipantInput{ID: id, Passive: false})
 			case *threadsv1.ParticipantIdentifier_ParticipantNickname:
 				if !organizationResolved {
 					orgID, err := s.organizationIDForNickname(ctx, req.OrganizationId)
@@ -134,14 +124,9 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 				if err != nil {
 					return nil, err
 				}
-				if hasInitiator && id == initiator.ID {
-					return nil, status.Error(codes.InvalidArgument, "participants must not include initiator")
+				if err := addResolvedParticipant(id, initiator, hasInitiator, seen, &resolved, "participants", i); err != nil {
+					return nil, err
 				}
-				if _, ok := seen[id]; ok {
-					return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: duplicate participant", i)
-				}
-				seen[id] = struct{}{}
-				resolved = append(resolved, store.ParticipantInput{ID: id, Passive: false})
 			default:
 				return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: identifier must be provided", i)
 			}
@@ -163,6 +148,18 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 	}
 	s.recordThreadCreated(ctx, thread)
 	return &threadsv1.CreateThreadResponse{Thread: toProtoThread(thread)}, nil
+}
+
+func addResolvedParticipant(id uuid.UUID, initiator initiatorInfo, hasInitiator bool, seen map[uuid.UUID]struct{}, resolved *[]store.ParticipantInput, fieldName string, index int) error {
+	if hasInitiator && id == initiator.ID {
+		return status.Errorf(codes.InvalidArgument, "%s must not include initiator", fieldName)
+	}
+	if _, ok := seen[id]; ok {
+		return status.Errorf(codes.InvalidArgument, "%s[%d]: duplicate participant", fieldName, index)
+	}
+	seen[id] = struct{}{}
+	*resolved = append(*resolved, store.ParticipantInput{ID: id, Passive: false})
+	return nil
 }
 
 func (s *Server) ArchiveThread(ctx context.Context, req *threadsv1.ArchiveThreadRequest) (*threadsv1.ArchiveThreadResponse, error) {
