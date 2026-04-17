@@ -70,34 +70,84 @@ func New(store threadStore, notifier notifierPublisher, identity identityResolve
 }
 
 func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRequest) (*threadsv1.CreateThreadResponse, error) {
-	ids := req.GetParticipantIds()
 	initiator, hasInitiator, err := initiatorInfoFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 && !hasInitiator {
-		return nil, status.Error(codes.InvalidArgument, "participant_ids must be provided")
+	ids := req.GetParticipantIds()
+	identifiers := req.GetParticipants()
+	if len(ids) > 0 && len(identifiers) > 0 {
+		return nil, status.Error(codes.InvalidArgument, "participant_ids and participants are mutually exclusive")
 	}
-	participantIDs := make([]uuid.UUID, len(ids))
-	seen := make(map[uuid.UUID]struct{}, len(ids))
-	for i, raw := range ids {
-		id, err := parseUUID(raw)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "participant_ids[%d]: %v", i, err)
-		}
-		if _, ok := seen[id]; ok {
-			return nil, status.Errorf(codes.InvalidArgument, "participant_ids[%d]: duplicate participant", i)
-		}
-		seen[id] = struct{}{}
-		participantIDs[i] = id
+	if len(ids) == 0 && len(identifiers) == 0 && !hasInitiator {
+		return nil, status.Error(codes.InvalidArgument, "participant_ids or participants must be provided")
 	}
-
-	if hasInitiator {
-		if _, ok := seen[initiator.ID]; ok {
-			return nil, status.Error(codes.InvalidArgument, "participant_ids must not include initiator")
+	seen := make(map[uuid.UUID]struct{}, len(ids)+len(identifiers))
+	resolved := make([]store.ParticipantInput, 0, len(ids)+len(identifiers))
+	if len(ids) > 0 {
+		for i, raw := range ids {
+			id, err := parseUUID(strings.TrimSpace(raw))
+			if err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "participant_ids[%d]: %v", i, err)
+			}
+			if hasInitiator && id == initiator.ID {
+				return nil, status.Error(codes.InvalidArgument, "participant_ids must not include initiator")
+			}
+			if _, ok := seen[id]; ok {
+				return nil, status.Errorf(codes.InvalidArgument, "participant_ids[%d]: duplicate participant", i)
+			}
+			seen[id] = struct{}{}
+			resolved = append(resolved, store.ParticipantInput{ID: id, Passive: false})
 		}
 	}
-	capacity := len(participantIDs)
+	if len(identifiers) > 0 {
+		var organizationID uuid.UUID
+		organizationResolved := false
+		for i, identifier := range identifiers {
+			if identifier == nil {
+				return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: identifier must be provided", i)
+			}
+			switch value := identifier.GetIdentifier().(type) {
+			case *threadsv1.ParticipantIdentifier_ParticipantId:
+				id, err := parseUUID(strings.TrimSpace(value.ParticipantId))
+				if err != nil {
+					return nil, status.Errorf(codes.InvalidArgument, "participants[%d].participant_id: %v", i, err)
+				}
+				if hasInitiator && id == initiator.ID {
+					return nil, status.Error(codes.InvalidArgument, "participants must not include initiator")
+				}
+				if _, ok := seen[id]; ok {
+					return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: duplicate participant", i)
+				}
+				seen[id] = struct{}{}
+				resolved = append(resolved, store.ParticipantInput{ID: id, Passive: false})
+			case *threadsv1.ParticipantIdentifier_ParticipantNickname:
+				if !organizationResolved {
+					orgID, err := s.organizationIDForNickname(ctx, req.OrganizationId)
+					if err != nil {
+						return nil, err
+					}
+					organizationID = orgID
+					organizationResolved = true
+				}
+				id, err := s.resolveNickname(ctx, organizationID, value.ParticipantNickname, fmt.Sprintf("participants[%d].participant_nickname", i))
+				if err != nil {
+					return nil, err
+				}
+				if hasInitiator && id == initiator.ID {
+					return nil, status.Error(codes.InvalidArgument, "participants must not include initiator")
+				}
+				if _, ok := seen[id]; ok {
+					return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: duplicate participant", i)
+				}
+				seen[id] = struct{}{}
+				resolved = append(resolved, store.ParticipantInput{ID: id, Passive: false})
+			default:
+				return nil, status.Errorf(codes.InvalidArgument, "participants[%d]: identifier must be provided", i)
+			}
+		}
+	}
+	capacity := len(resolved)
 	if hasInitiator {
 		capacity++
 	}
@@ -105,9 +155,7 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 	if hasInitiator {
 		participants = append(participants, store.ParticipantInput{ID: initiator.ID, Passive: initiator.Passive})
 	}
-	for _, participantID := range participantIDs {
-		participants = append(participants, store.ParticipantInput{ID: participantID, Passive: false})
-	}
+	participants = append(participants, resolved...)
 
 	thread, err := s.store.CreateThread(ctx, participants)
 	if err != nil {
@@ -363,7 +411,7 @@ func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddPar
 			}
 			return participantID, nil
 		case *threadsv1.ParticipantIdentifier_ParticipantNickname:
-			return s.resolveParticipantNickname(ctx, req, value.ParticipantNickname)
+			return s.resolveAddParticipantNickname(ctx, req.OrganizationId, value.ParticipantNickname)
 		default:
 			return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
 		}
@@ -378,18 +426,22 @@ func (s *Server) resolveParticipantID(ctx context.Context, req *threadsv1.AddPar
 	return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant identifier must be provided")
 }
 
-func (s *Server) resolveParticipantNickname(ctx context.Context, req *threadsv1.AddParticipantRequest, nickname string) (uuid.UUID, error) {
+func (s *Server) resolveAddParticipantNickname(ctx context.Context, organizationIDValue *string, nickname string) (uuid.UUID, error) {
+	organizationID, err := s.organizationIDForNickname(ctx, organizationIDValue)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	return s.resolveNickname(ctx, organizationID, nickname, "participant.participant_nickname")
+}
+
+func (s *Server) resolveNickname(ctx context.Context, organizationID uuid.UUID, nickname string, fieldName string) (uuid.UUID, error) {
 	trimmed := strings.TrimSpace(nickname)
 	if trimmed == "" {
-		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
+		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s must be provided", fieldName)
 	}
 	cleaned := strings.TrimPrefix(trimmed, "@")
 	if cleaned == "" {
-		return uuid.UUID{}, status.Error(codes.InvalidArgument, "participant.participant_nickname must be provided")
-	}
-	organizationID, err := s.organizationIDForNickname(ctx, req)
-	if err != nil {
-		return uuid.UUID{}, err
+		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s must be provided", fieldName)
 	}
 	response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
 		OrganizationId: organizationID.String(),
@@ -405,9 +457,9 @@ func (s *Server) resolveParticipantNickname(ctx context.Context, req *threadsv1.
 	return participantID, nil
 }
 
-func (s *Server) organizationIDForNickname(ctx context.Context, req *threadsv1.AddParticipantRequest) (uuid.UUID, error) {
-	if req.OrganizationId != nil {
-		organizationID, err := parseUUID(strings.TrimSpace(req.GetOrganizationId()))
+func (s *Server) organizationIDForNickname(ctx context.Context, organizationIDValue *string) (uuid.UUID, error) {
+	if organizationIDValue != nil {
+		organizationID, err := parseUUID(strings.TrimSpace(*organizationIDValue))
 		if err != nil {
 			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 		}
