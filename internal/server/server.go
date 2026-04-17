@@ -38,7 +38,7 @@ const (
 )
 
 type threadStore interface {
-	CreateThread(ctx context.Context, participantIDs []uuid.UUID) (store.Thread, error)
+	CreateThread(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error)
 	ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
 	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
@@ -88,7 +88,28 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 		participantIDs[i] = id
 	}
 
-	thread, err := s.store.CreateThread(ctx, participantIDs)
+	initiator, hasInitiator, err := initiatorInfoFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if hasInitiator {
+		if _, ok := seen[initiator.ID]; ok {
+			return nil, status.Error(codes.InvalidArgument, "participant_ids must not include initiator")
+		}
+	}
+	capacity := len(participantIDs)
+	if hasInitiator {
+		capacity++
+	}
+	participants := make([]store.ParticipantInput, 0, capacity)
+	if hasInitiator {
+		participants = append(participants, store.ParticipantInput{ID: initiator.ID, Passive: initiator.Passive})
+	}
+	for _, participantID := range participantIDs {
+		participants = append(participants, store.ParticipantInput{ID: participantID, Passive: false})
+	}
+
+	thread, err := s.store.CreateThread(ctx, participants)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -451,6 +472,29 @@ func (s *Server) organizationIDFromIdentity(ctx context.Context) (uuid.UUID, err
 		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent organization_id: %v", err)
 	}
 	return orgID, nil
+}
+
+type initiatorInfo struct {
+	ID      uuid.UUID
+	Passive bool
+}
+
+func initiatorInfoFromContext(ctx context.Context) (initiatorInfo, bool, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return initiatorInfo{}, false, nil
+	}
+	identityID := metadataValue(md, identityIDMetadataKey)
+	identityType := metadataValue(md, identityTypeMetadataKey)
+	if identityID == "" || identityType == "" {
+		return initiatorInfo{}, false, nil
+	}
+	initiatorID, err := parseUUID(identityID)
+	if err != nil {
+		return initiatorInfo{}, false, status.Errorf(codes.InvalidArgument, "identity_id: %v", err)
+	}
+	passive := strings.EqualFold(identityType, agentIdentityType)
+	return initiatorInfo{ID: initiatorID, Passive: passive}, true, nil
 }
 
 func metadataValue(md metadata.MD, key string) string {
