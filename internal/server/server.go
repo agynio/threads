@@ -274,7 +274,7 @@ func (s *Server) GetThreads(ctx context.Context, req *threadsv1.GetThreadsReques
 	return resp, nil
 }
 
-func (s *Server) ListOrganizationThreads(ctx context.Context, req *threadsv1.ListOrganizationThreadsRequest) (*threadsv1.ListOrganizationThreadsResponse, error) {
+func (s *Server) GetOrganizationThreads(ctx context.Context, req *threadsv1.GetOrganizationThreadsRequest) (*threadsv1.GetOrganizationThreadsResponse, error) {
 	organizationID, err := parseUUID(req.GetOrganizationId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
@@ -287,13 +287,9 @@ func (s *Server) ListOrganizationThreads(ctx context.Context, req *threadsv1.Lis
 		return nil, err
 	}
 
-	var statusFilter *store.ThreadStatus
-	if req.Status != nil {
-		parsed, err := threadStatusFromProto(req.GetStatus())
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "status: %v", err)
-		}
-		statusFilter = &parsed
+	statusFilter, err := threadStatusFilterFromProto(req.GetStatus())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "status: %v", err)
 	}
 
 	var cursor *store.OrganizationThreadCursor
@@ -312,7 +308,7 @@ func (s *Server) ListOrganizationThreads(ctx context.Context, req *threadsv1.Lis
 	if err != nil {
 		return nil, toStatusError(err)
 	}
-	resp := &threadsv1.ListOrganizationThreadsResponse{Threads: make([]*threadsv1.Thread, len(result.Threads))}
+	resp := &threadsv1.GetOrganizationThreadsResponse{Threads: make([]*threadsv1.Thread, len(result.Threads))}
 	for i, thread := range result.Threads {
 		resp.Threads[i] = toProtoThread(thread)
 	}
@@ -662,16 +658,18 @@ func (s *Server) checkCanViewThreads(ctx context.Context, identityID, organizati
 	return nil
 }
 
-func threadStatusFromProto(status threadsv1.ThreadStatus) (store.ThreadStatus, error) {
+func threadStatusFilterFromProto(status threadsv1.ThreadStatus) (*store.ThreadStatus, error) {
 	switch status {
-	case threadsv1.ThreadStatus_THREAD_STATUS_ACTIVE:
-		return store.ThreadStatusActive, nil
-	case threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED:
-		return store.ThreadStatusArchived, nil
 	case threadsv1.ThreadStatus_THREAD_STATUS_UNSPECIFIED:
-		return store.ThreadStatusUnspecified, errors.New("status must be set")
+		return nil, nil
+	case threadsv1.ThreadStatus_THREAD_STATUS_ACTIVE:
+		value := store.ThreadStatusActive
+		return &value, nil
+	case threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED:
+		value := store.ThreadStatusArchived
+		return &value, nil
 	default:
-		return store.ThreadStatusUnspecified, errors.New("invalid thread status")
+		return nil, errors.New("invalid thread status")
 	}
 }
 

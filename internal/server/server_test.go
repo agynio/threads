@@ -1112,7 +1112,7 @@ func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
 	}
 }
 
-func TestListOrganizationThreadsAuthorizationDenied(t *testing.T) {
+func TestGetOrganizationThreadsAuthorizationDenied(t *testing.T) {
 	organizationID := uuid.New()
 	identityID := uuid.New()
 	authCalled := false
@@ -1141,7 +1141,7 @@ func TestListOrganizationThreadsAuthorizationDenied(t *testing.T) {
 
 	srv := New(&stubThreadStore{t: t}, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
-	_, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{OrganizationId: organizationID.String()})
+	_, err := srv.GetOrganizationThreads(ctx, &threadsv1.GetOrganizationThreadsRequest{OrganizationId: organizationID.String()})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1157,7 +1157,7 @@ func TestListOrganizationThreadsAuthorizationDenied(t *testing.T) {
 	}
 }
 
-func TestListOrganizationThreadsPagination(t *testing.T) {
+func TestGetOrganizationThreadsPagination(t *testing.T) {
 	organizationID := uuid.New()
 	identityID := uuid.New()
 	threadID := uuid.New()
@@ -1224,19 +1224,19 @@ func TestListOrganizationThreadsPagination(t *testing.T) {
 
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
-	resp, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{
+	resp, err := srv.GetOrganizationThreads(ctx, &threadsv1.GetOrganizationThreadsRequest{
 		OrganizationId: organizationID.String(),
 		PageSize:       1,
 		PageToken:      pageToken,
 	})
 	if err != nil {
-		t.Fatalf("ListOrganizationThreads returned error: %v", err)
+		t.Fatalf("GetOrganizationThreads returned error: %v", err)
 	}
 	if !authCalled {
 		t.Fatal("expected authorization check")
 	}
 	if !storeCalled {
-		t.Fatal("expected ListOrganizationThreads to be called")
+				t.Fatal("expected GetOrganizationThreads to be called")
 	}
 	if len(resp.GetThreads()) != 1 {
 		t.Fatalf("expected 1 thread, got %d", len(resp.GetThreads()))
