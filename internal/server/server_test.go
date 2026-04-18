@@ -6,6 +6,7 @@ import (
 	"time"
 
 	agentsv1 "github.com/agynio/threads/.gen/go/agynio/api/agents/v1"
+	authorizationv1 "github.com/agynio/threads/.gen/go/agynio/api/authorization/v1"
 	identityv1 "github.com/agynio/threads/.gen/go/agynio/api/identity/v1"
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"github.com/google/uuid"
@@ -19,8 +20,11 @@ import (
 
 type stubThreadStore struct {
 	t                *testing.T
-	createThreadFn   func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error)
+	createThreadFn   func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
 	addParticipantFn func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
+	getThreadFn      func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	listOrgThreadsFn func(ctx context.Context, organizationID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
+	listMessagesFn   func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
 }
 
 func (s *stubThreadStore) unexpectedCall(method string) {
@@ -28,12 +32,12 @@ func (s *stubThreadStore) unexpectedCall(method string) {
 	s.t.Fatalf("unexpected %s call", method)
 }
 
-func (s *stubThreadStore) CreateThread(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+func (s *stubThreadStore) CreateThread(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 	s.t.Helper()
 	if s.createThreadFn == nil {
 		s.t.Fatalf("unexpected CreateThread call")
 	}
-	return s.createThreadFn(ctx, participants)
+	return s.createThreadFn(ctx, organizationID, participants)
 }
 
 func (s *stubThreadStore) ArchiveThread(context.Context, uuid.UUID) (store.Thread, error) {
@@ -54,14 +58,33 @@ func (s *stubThreadStore) SendMessage(context.Context, uuid.UUID, uuid.UUID, str
 	return store.SendMessageResult{}, nil
 }
 
+func (s *stubThreadStore) GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error) {
+	s.t.Helper()
+	if s.getThreadFn == nil {
+		s.t.Fatalf("unexpected GetThread call")
+	}
+	return s.getThreadFn(ctx, threadID)
+}
+
 func (s *stubThreadStore) ListThreads(context.Context, uuid.UUID, int32, *store.ThreadCursor) (store.ThreadListResult, error) {
 	s.unexpectedCall("ListThreads")
 	return store.ThreadListResult{}, nil
 }
 
-func (s *stubThreadStore) ListMessages(context.Context, uuid.UUID, int32, *store.MessageCursor) (store.MessageListResult, error) {
-	s.unexpectedCall("ListMessages")
-	return store.MessageListResult{}, nil
+func (s *stubThreadStore) ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+	s.t.Helper()
+	if s.listOrgThreadsFn == nil {
+		s.t.Fatalf("unexpected ListOrganizationThreads call")
+	}
+	return s.listOrgThreadsFn(ctx, organizationID, status, pageSize, cursor)
+}
+
+func (s *stubThreadStore) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error) {
+	s.t.Helper()
+	if s.listMessagesFn == nil {
+		s.t.Fatalf("unexpected ListMessages call")
+	}
+	return s.listMessagesFn(ctx, threadID, pageSize, cursor, order)
 }
 
 func (s *stubThreadStore) ListUnackedMessages(context.Context, uuid.UUID, *uuid.UUID, int32, *store.MessageCursor) (store.MessageListResult, error) {
@@ -100,8 +123,22 @@ func (s *stubAgentsService) GetAgent(ctx context.Context, req *agentsv1.GetAgent
 	return s.getAgentFn(ctx, req, opts...)
 }
 
+type stubAuthorizationService struct {
+	t       *testing.T
+	checkFn func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error)
+}
+
+func (s *stubAuthorizationService) Check(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+	s.t.Helper()
+	if s.checkFn == nil {
+		s.t.Fatalf("unexpected Check call")
+	}
+	return s.checkFn(ctx, req, opts...)
+}
+
 func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 	threadID := uuid.New()
+	organizationID := uuid.New()
 	agentID := uuid.New()
 	participantID := uuid.New()
 	now := time.Now().UTC()
@@ -109,8 +146,11 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 2 {
 				t.Fatalf("expected 2 participants, got %d", len(participants))
 			}
@@ -127,10 +167,12 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 				t.Fatalf("expected participant passive false")
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: agentID, JoinedAt: now, Passive: true},
 					{ID: participantID, JoinedAt: now, Passive: false},
@@ -139,10 +181,10 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
-		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent", "x-organization-id", organizationID.String()),
 	)
 	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{
 		Participants: []*threadsv1.ParticipantIdentifier{
@@ -166,14 +208,18 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 
 func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 	threadID := uuid.New()
+	organizationID := uuid.New()
 	agentID := uuid.New()
 	now := time.Now().UTC()
 	storeCalled := false
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 1 {
 				t.Fatalf("expected 1 participant, got %d", len(participants))
 			}
@@ -184,10 +230,12 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 				t.Fatalf("expected initiator passive true")
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: agentID, JoinedAt: now, Passive: true},
 				},
@@ -195,10 +243,10 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
-		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
+		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent", "x-organization-id", organizationID.String()),
 	)
 	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{})
 	if err != nil {
@@ -218,6 +266,7 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 
 func TestCreateThreadUserInitiatorActive(t *testing.T) {
 	threadID := uuid.New()
+	organizationID := uuid.New()
 	userID := uuid.New()
 	participantID := uuid.New()
 	now := time.Now().UTC()
@@ -225,8 +274,11 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 2 {
 				t.Fatalf("expected 2 participants, got %d", len(participants))
 			}
@@ -243,10 +295,12 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 				t.Fatalf("expected participant passive false")
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: userID, JoinedAt: now, Passive: false},
 					{ID: participantID, JoinedAt: now, Passive: false},
@@ -255,10 +309,10 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
-		metadata.Pairs("x-identity-id", userID.String(), "x-identity-type", "user"),
+		metadata.Pairs("x-identity-id", userID.String(), "x-identity-type", "user", "x-organization-id", organizationID.String()),
 	)
 	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{participantID.String()}})
 	if err != nil {
@@ -278,14 +332,18 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 
 func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 	threadID := uuid.New()
+	organizationID := uuid.New()
 	participantID := uuid.New()
 	now := time.Now().UTC()
 	storeCalled := false
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 1 {
 				t.Fatalf("expected 1 participant, got %d", len(participants))
 			}
@@ -296,10 +354,12 @@ func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 				t.Fatalf("expected participant passive false")
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: participantID, JoinedAt: now, Passive: false},
 				},
@@ -307,8 +367,12 @@ func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil, nil)
-	resp, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{ParticipantIds: []string{participantID.String()}})
+	srv := New(storeStub, nil, nil, nil, nil, nil)
+	orgIDValue := organizationID.String()
+	resp, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{
+		OrganizationId: &orgIDValue,
+		ParticipantIds: []string{participantID.String()},
+	})
 	if err != nil {
 		t.Fatalf("CreateThread returned error: %v", err)
 	}
@@ -334,8 +398,11 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 1 {
 				t.Fatalf("expected 1 participant, got %d", len(participants))
 			}
@@ -343,10 +410,12 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 				t.Fatalf("expected participant %s, got %s", participantID, participants[0].ID)
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: participantID, JoinedAt: now, Passive: false},
 				},
@@ -367,7 +436,7 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, nil, nil)
+	srv := New(storeStub, nil, nil, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
 	resp, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{
 		OrganizationId: &orgIDValue,
@@ -401,8 +470,11 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 2 {
 				t.Fatalf("expected 2 participants, got %d", len(participants))
 			}
@@ -416,10 +488,12 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: agentID, JoinedAt: now, Passive: true},
 					{ID: participantID, JoinedAt: now, Passive: false},
@@ -451,7 +525,7 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, agentsStub, nil)
+	srv := New(storeStub, nil, nil, identityStub, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
@@ -486,8 +560,11 @@ func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
 			if len(participants) != 2 {
 				t.Fatalf("expected 2 participants, got %d", len(participants))
 			}
@@ -498,10 +575,12 @@ func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
 				t.Fatalf("expected participant %s second, got %s", nicknameID, participants[1].ID)
 			}
 			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
 				Participants: []store.Participant{
 					{ID: participantID, JoinedAt: now, Passive: false},
 					{ID: nicknameID, JoinedAt: now, Passive: false},
@@ -523,7 +602,7 @@ func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, nil, nil)
+	srv := New(storeStub, nil, nil, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
 	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{
 		OrganizationId: &orgIDValue,
@@ -544,7 +623,7 @@ func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
 }
 
 func TestCreateThreadMissingIdentityMetadataRejectsEmpty(t *testing.T) {
-	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
 	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{})
 	if err == nil {
 		t.Fatal("expected error")
@@ -564,7 +643,7 @@ func TestCreateThreadMissingIdentityMetadataRejectsEmpty(t *testing.T) {
 func TestCreateThreadRejectsMixedParticipantFields(t *testing.T) {
 	participantID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
 	_, err := srv.CreateThread(context.Background(), &threadsv1.CreateThreadRequest{
 		ParticipantIds: []string{participantID.String()},
 		Participants: []*threadsv1.ParticipantIdentifier{
@@ -589,7 +668,7 @@ func TestCreateThreadRejectsMixedParticipantFields(t *testing.T) {
 func TestCreateThreadNicknameRequiresOrganizationIDForUser(t *testing.T) {
 	userID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", userID.String(), "x-identity-type", "user"),
@@ -618,7 +697,7 @@ func TestCreateThreadRejectsInitiatorInParticipants(t *testing.T) {
 	initiatorID := uuid.New()
 	participantID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", initiatorID.String(), "x-identity-type", "agent"),
@@ -682,7 +761,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, nil, nil)
+	srv := New(storeStub, nil, nil, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", uuid.New().String()))
 	resp, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
@@ -732,7 +811,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{
@@ -766,7 +845,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, nil, nil, nil)
+	srv := New(storeStub, nil, nil, nil, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId:      threadID.String(),
 		ParticipantId: participantID.String(),
@@ -782,7 +861,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 func TestAddParticipantNicknameRequiresOrganizationID(t *testing.T) {
 	threadID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, nil, nil)
 	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{
@@ -838,7 +917,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, nil, nil)
+	srv := New(storeStub, nil, nil, identityStub, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
@@ -905,7 +984,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T)
 		},
 	}
 
-	srv := New(storeStub, nil, identityStub, agentsStub, nil)
+	srv := New(storeStub, nil, nil, identityStub, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
@@ -937,7 +1016,7 @@ func TestAddParticipantNicknameRejectsNonAgentIdentityTypes(t *testing.T) {
 
 	for _, identityType := range identityTypes {
 		t.Run(identityType, func(t *testing.T) {
-			srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, nil, nil)
+			srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, nil, nil)
 			ctx := metadata.NewIncomingContext(
 				context.Background(),
 				metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", identityType),
@@ -976,7 +1055,7 @@ func TestAddParticipantNicknameAgentLookupError(t *testing.T) {
 		},
 	}
 
-	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
@@ -1010,7 +1089,7 @@ func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
 		},
 	}
 
-	srv := New(&stubThreadStore{t: t}, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
+	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
@@ -1030,6 +1109,278 @@ func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
 	}
 	if st.Code() != codes.Internal {
 		t.Fatalf("expected Internal, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestListOrganizationThreadsAuthorizationDenied(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	authCalled := false
+
+	authStub := &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			authCalled = true
+			if req.GetTupleKey() == nil {
+				t.Fatal("expected tuple key")
+			}
+			if req.GetTupleKey().GetRelation() != "can_view_threads" {
+				t.Fatalf("expected relation can_view_threads, got %s", req.GetTupleKey().GetRelation())
+			}
+			expectedUser := identityObjectPrefix + identityID.String()
+			if req.GetTupleKey().GetUser() != expectedUser {
+				t.Fatalf("expected user %s, got %s", expectedUser, req.GetTupleKey().GetUser())
+			}
+			expectedObject := organizationObjectPrefix + organizationID.String()
+			if req.GetTupleKey().GetObject() != expectedObject {
+				t.Fatalf("expected object %s, got %s", expectedObject, req.GetTupleKey().GetObject())
+			}
+			return &authorizationv1.CheckResponse{Allowed: false}, nil
+		},
+	}
+
+	srv := New(&stubThreadStore{t: t}, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{OrganizationId: organizationID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
+	}
+	if !authCalled {
+		t.Fatal("expected authorization check")
+	}
+}
+
+func TestListOrganizationThreadsPagination(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	threadID := uuid.New()
+	participantID := uuid.New()
+	createdAt := time.Now().UTC().Add(-2 * time.Hour)
+	updatedAt := createdAt.Add(10 * time.Minute)
+	pageCursor := store.OrganizationThreadCursor{CreatedAt: createdAt.Add(30 * time.Minute), ThreadID: uuid.New()}
+	pageToken, err := store.EncodeOrganizationThreadPageToken(organizationID, pageCursor)
+	if err != nil {
+		t.Fatalf("encode page token: %v", err)
+	}
+	nextCursor := store.OrganizationThreadCursor{CreatedAt: createdAt, ThreadID: threadID}
+	expectedNextToken, err := store.EncodeOrganizationThreadPageToken(organizationID, nextCursor)
+	if err != nil {
+		t.Fatalf("encode next token: %v", err)
+	}
+	storeCalled := false
+	authCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
+			if status != nil {
+				t.Fatalf("expected nil status filter")
+			}
+			if pageSize != 1 {
+				t.Fatalf("expected page size 1, got %d", pageSize)
+			}
+			if cursor == nil {
+				t.Fatal("expected cursor")
+			}
+			if cursor.ThreadID != pageCursor.ThreadID || !cursor.CreatedAt.Equal(pageCursor.CreatedAt) {
+				t.Fatalf("unexpected cursor: %+v", cursor)
+			}
+			return store.OrganizationThreadListResult{
+				Threads: []store.Thread{
+					{
+						ID:             threadID,
+						OrganizationID: &organizationID,
+						MessageCount:   3,
+						Status:         store.ThreadStatusActive,
+						CreatedAt:      createdAt,
+						UpdatedAt:      updatedAt,
+						Participants: []store.Participant{
+							{ID: participantID, JoinedAt: createdAt, Passive: false},
+						},
+					},
+				},
+				NextCursor: &nextCursor,
+			}, nil
+		},
+	}
+	authStub := &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			authCalled = true
+			return &authorizationv1.CheckResponse{Allowed: true}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	resp, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{
+		OrganizationId: organizationID.String(),
+		PageSize:       1,
+		PageToken:      pageToken,
+	})
+	if err != nil {
+		t.Fatalf("ListOrganizationThreads returned error: %v", err)
+	}
+	if !authCalled {
+		t.Fatal("expected authorization check")
+	}
+	if !storeCalled {
+		t.Fatal("expected ListOrganizationThreads to be called")
+	}
+	if len(resp.GetThreads()) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(resp.GetThreads()))
+	}
+	if resp.GetThreads()[0].GetId() != threadID.String() {
+		t.Fatalf("expected thread id %s, got %s", threadID, resp.GetThreads()[0].GetId())
+	}
+	if resp.GetNextPageToken() != expectedNextToken {
+		t.Fatalf("expected next page token %s, got %s", expectedNextToken, resp.GetNextPageToken())
+	}
+}
+
+func TestGetThreadAuthorizationDenied(t *testing.T) {
+	organizationID := uuid.New()
+	threadID := uuid.New()
+	identityID := uuid.New()
+	authCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			if id != threadID {
+				t.Fatalf("expected thread id %s, got %s", threadID, id)
+			}
+			return store.Thread{
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      time.Now().UTC(),
+				UpdatedAt:      time.Now().UTC(),
+			}, nil
+		},
+	}
+	authStub := &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			authCalled = true
+			return &authorizationv1.CheckResponse{Allowed: false}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.GetThread(ctx, &threadsv1.GetThreadRequest{ThreadId: threadID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
+	}
+	if !authCalled {
+		t.Fatal("expected authorization check")
+	}
+}
+
+func TestGetThreadMissingOrganizationID(t *testing.T) {
+	threadID := uuid.New()
+	storeStub := &stubThreadStore{
+		t: t,
+		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			if id != threadID {
+				t.Fatalf("expected thread id %s, got %s", threadID, id)
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil, nil)
+	_, err := srv.GetThread(context.Background(), &threadsv1.GetThreadRequest{ThreadId: threadID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.NotFound {
+		t.Fatalf("expected NotFound, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestGetMessagesNewestFirst(t *testing.T) {
+	threadID := uuid.New()
+	messageID := uuid.New()
+	senderID := uuid.New()
+	createdAt := time.Now().UTC()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		listMessagesFn: func(ctx context.Context, id uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error) {
+			storeCalled = true
+			if id != threadID {
+				t.Fatalf("expected thread id %s, got %s", threadID, id)
+			}
+			if pageSize != 2 {
+				t.Fatalf("expected page size 2, got %d", pageSize)
+			}
+			if cursor != nil {
+				t.Fatal("expected nil cursor")
+			}
+			if order != store.MessageOrderNewestFirst {
+				t.Fatalf("expected newest-first order, got %v", order)
+			}
+			return store.MessageListResult{
+				Messages: []store.Message{
+					{
+						ID:        messageID,
+						ThreadID:  threadID,
+						SenderID:  senderID,
+						Body:      "hello",
+						CreatedAt: createdAt,
+					},
+				},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil, nil)
+	resp, err := srv.GetMessages(context.Background(), &threadsv1.GetMessagesRequest{
+		ThreadId: threadID.String(),
+		PageSize: 2,
+		Order:    threadsv1.MessageOrder_MESSAGE_ORDER_NEWEST_FIRST,
+	})
+	if err != nil {
+		t.Fatalf("GetMessages returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected ListMessages to be called")
+	}
+	if len(resp.GetMessages()) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(resp.GetMessages()))
+	}
+	if resp.GetMessages()[0].GetId() != messageID.String() {
+		t.Fatalf("expected message id %s, got %s", messageID, resp.GetMessages()[0].GetId())
 	}
 }
 

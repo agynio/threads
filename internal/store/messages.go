@@ -19,11 +19,11 @@ type SendMessageResult struct {
 func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (SendMessageResult, error) {
 	var result SendMessageResult
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
-		status, _, _, err := loadThreadRow(ctx, tx, threadID, true)
+		thread, err := loadThreadRow(ctx, tx, threadID, true)
 		if err != nil {
 			return err
 		}
-		if status == ThreadStatusArchived {
+		if thread.Status == ThreadStatusArchived {
 			return ErrThreadArchived
 		}
 		var isParticipant bool
@@ -54,7 +54,7 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE threads SET updated_at = $2 WHERE id = $1`, threadID, now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE threads SET updated_at = $2, message_count = message_count + 1 WHERE id = $1`, threadID, now); err != nil {
 			return err
 		}
 		result = SendMessageResult{
@@ -97,7 +97,7 @@ func loadRecipients(ctx context.Context, q queryer, threadID, senderID uuid.UUID
 	return recipients, nil
 }
 
-func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *MessageCursor) (MessageListResult, error) {
+func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *MessageCursor, order MessageOrder) (MessageListResult, error) {
 	if err := ensureThreadExists(ctx, s.pool, threadID); err != nil {
 		return MessageListResult{}, err
 	}
@@ -109,11 +109,19 @@ func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize i
 	args := []any{threadID}
 	paramIndex := 2
 	if cursor != nil {
-		query.WriteString(fmt.Sprintf(" AND (created_at, id) > ($%d, $%d)", paramIndex, paramIndex+1))
+		operator := ">"
+		if order == MessageOrderNewestFirst {
+			operator = "<"
+		}
+		query.WriteString(fmt.Sprintf(" AND (created_at, id) %s ($%d, $%d)", operator, paramIndex, paramIndex+1))
 		args = append(args, cursor.CreatedAt, cursor.MessageID)
 		paramIndex += 2
 	}
-	query.WriteString(fmt.Sprintf(" ORDER BY created_at ASC, id ASC LIMIT $%d", paramIndex))
+	orderClause := "ORDER BY created_at ASC, id ASC"
+	if order == MessageOrderNewestFirst {
+		orderClause = "ORDER BY created_at DESC, id DESC"
+	}
+	query.WriteString(fmt.Sprintf(" %s LIMIT $%d", orderClause, paramIndex))
 	args = append(args, int(limit)+1)
 
 	rows, err := s.pool.Query(ctx, query.String(), args...)

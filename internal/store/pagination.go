@@ -70,6 +70,51 @@ func DecodeThreadPageToken(token string) (uuid.UUID, ThreadCursor, error) {
 	}, nil
 }
 
+type organizationThreadPageToken struct {
+	OrganizationID string `json:"organization_id"`
+	CreatedAtNanos int64  `json:"created_at_nanos"`
+	ThreadID       string `json:"thread_id"`
+}
+
+func EncodeOrganizationThreadPageToken(organizationID uuid.UUID, cursor OrganizationThreadCursor) (string, error) {
+	payload := organizationThreadPageToken{
+		OrganizationID: organizationID.String(),
+		CreatedAtNanos: cursor.CreatedAt.UnixNano(),
+		ThreadID:       cursor.ThreadID.String(),
+	}
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func DecodeOrganizationThreadPageToken(token string) (uuid.UUID, OrganizationThreadCursor, error) {
+	if token == "" {
+		return uuid.UUID{}, OrganizationThreadCursor{}, errors.New("empty token")
+	}
+	data, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return uuid.UUID{}, OrganizationThreadCursor{}, fmt.Errorf("decode token: %w", err)
+	}
+	var payload organizationThreadPageToken
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return uuid.UUID{}, OrganizationThreadCursor{}, fmt.Errorf("unmarshal token: %w", err)
+	}
+	organizationID, err := uuid.Parse(payload.OrganizationID)
+	if err != nil {
+		return uuid.UUID{}, OrganizationThreadCursor{}, fmt.Errorf("parse organization id: %w", err)
+	}
+	threadID, err := uuid.Parse(payload.ThreadID)
+	if err != nil {
+		return uuid.UUID{}, OrganizationThreadCursor{}, fmt.Errorf("parse thread id: %w", err)
+	}
+	return organizationID, OrganizationThreadCursor{
+		CreatedAt: time.Unix(0, payload.CreatedAtNanos).UTC(),
+		ThreadID:  threadID,
+	}, nil
+}
+
 type messagePageToken struct {
 	OwnerID        string `json:"owner_id"`
 	CreatedAtNanos int64  `json:"created_at_nanos"`
