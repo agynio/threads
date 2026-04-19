@@ -148,7 +148,7 @@ type stubAuthorizationService struct {
 func (s *stubAuthorizationService) Check(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
 	s.t.Helper()
 	if s.checkFn == nil {
-		return &authorizationv1.CheckResponse{Allowed: true}, nil
+		s.t.Fatalf("unexpected Check call")
 	}
 	return s.checkFn(ctx, req, opts...)
 }
@@ -159,6 +159,16 @@ func (s *stubAuthorizationService) Write(ctx context.Context, req *authorization
 		return &authorizationv1.WriteResponse{}, nil
 	}
 	return s.writeFn(ctx, req, opts...)
+}
+
+func allowAuthStub(t *testing.T) *stubAuthorizationService {
+	t.Helper()
+	return &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			return &authorizationv1.CheckResponse{Allowed: true}, nil
+		},
+	}
 }
 
 func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
@@ -206,7 +216,7 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 		},
 	}
 
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
@@ -269,7 +279,7 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 		},
 	}
 
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
@@ -336,7 +346,7 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 		},
 	}
 
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
@@ -468,7 +478,7 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
@@ -559,7 +569,7 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 		},
 	}
 
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
@@ -638,7 +648,7 @@ func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
@@ -943,7 +953,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String(), "x-identity-id", identityID.String()))
@@ -995,7 +1005,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
@@ -1032,7 +1042,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
@@ -1175,9 +1185,12 @@ func TestAddParticipantWritesAuthorizationTuple(t *testing.T) {
 
 func TestAddParticipantNicknameRequiresOrganizationID(t *testing.T) {
 	threadID := uuid.New()
+	identityID := uuid.New()
+	authStub := allowAuthStub(t)
 
-	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, nil, nil)
-	_, err := srv.AddParticipant(context.Background(), &threadsv1.AddParticipantRequest{
+	srv := New(&stubThreadStore{t: t}, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
 		Participant: &threadsv1.ParticipantIdentifier{
 			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-alpha"},
@@ -1233,7 +1246,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String(), "x-identity-id", identityID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
@@ -1301,7 +1314,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T)
 		},
 	}
 
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
@@ -1334,7 +1347,8 @@ func TestAddParticipantNicknameRejectsNonAgentIdentityTypes(t *testing.T) {
 
 	for _, identityType := range identityTypes {
 		t.Run(identityType, func(t *testing.T) {
-			srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, nil, nil)
+			authStub := allowAuthStub(t)
+			srv := New(&stubThreadStore{t: t}, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 			ctx := metadata.NewIncomingContext(
 				context.Background(),
 				metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", identityType),
@@ -1372,8 +1386,9 @@ func TestAddParticipantNicknameAgentLookupError(t *testing.T) {
 			return nil, status.Error(codes.Internal, "agent down")
 		},
 	}
+	authStub := allowAuthStub(t)
 
-	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
+	srv := New(&stubThreadStore{t: t}, nil, authStub, &stubIdentityResolver{t: t}, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
@@ -1406,8 +1421,9 @@ func TestAddParticipantNicknameAgentMissingOrganization(t *testing.T) {
 			return &agentsv1.GetAgentResponse{Agent: &agentsv1.Agent{}}, nil
 		},
 	}
+	authStub := allowAuthStub(t)
 
-	srv := New(&stubThreadStore{t: t}, nil, nil, &stubIdentityResolver{t: t}, agentsStub, nil)
+	srv := New(&stubThreadStore{t: t}, nil, authStub, &stubIdentityResolver{t: t}, agentsStub, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent"),
@@ -1497,8 +1513,8 @@ func TestArchiveThreadAuthorizationDenied(t *testing.T) {
 
 func TestSendMessageAuthorizationDenied(t *testing.T) {
 	threadID := uuid.New()
-	senderID := uuid.New()
 	identityID := uuid.New()
+	senderID := identityID
 	storeCalled := false
 	authCalled := false
 
@@ -1549,6 +1565,85 @@ func TestSendMessageAuthorizationDenied(t *testing.T) {
 	}
 	if storeCalled {
 		t.Fatal("expected SendMessage not to be called")
+	}
+}
+
+func TestSendMessageRejectsSenderMismatch(t *testing.T) {
+	threadID := uuid.New()
+	identityID := uuid.New()
+	senderID := uuid.New()
+	storeCalled := false
+	authCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+			storeCalled = true
+			return store.SendMessageResult{}, nil
+		},
+	}
+	authStub := &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			authCalled = true
+			return &authorizationv1.CheckResponse{Allowed: true}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.SendMessage(ctx, &threadsv1.SendMessageRequest{ThreadId: threadID.String(), SenderId: senderID.String(), Body: "hi"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
+	}
+	if authCalled {
+		t.Fatal("expected authorization check not to be called")
+	}
+	if storeCalled {
+		t.Fatal("expected SendMessage not to be called")
+	}
+}
+
+func TestGetThreadsMissingIdentity(t *testing.T) {
+	participantID := uuid.New()
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
+	_, err := srv.GetThreads(context.Background(), &threadsv1.GetThreadsRequest{ParticipantId: participantID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestGetThreadsParticipantMismatch(t *testing.T) {
+	participantID := uuid.New()
+	identityID := uuid.New()
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.GetThreads(ctx, &threadsv1.GetThreadsRequest{ParticipantId: participantID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
 	}
 }
 
@@ -1919,7 +2014,7 @@ func TestGetMessagesNewestFirst(t *testing.T) {
 	}
 
 	identityID := uuid.New()
-	authStub := &stubAuthorizationService{t: t}
+	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, nil, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
 	resp, err := srv.GetMessages(ctx, &threadsv1.GetMessagesRequest{

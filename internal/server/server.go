@@ -250,15 +250,15 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
 	}
-	participantID, err := s.resolveParticipantID(ctx, req)
-	if err != nil {
-		return nil, err
-	}
 	identityID, err := identityIDFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.requireAllowed(ctx, identityID, "can_add_participant", fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())); err != nil {
+		return nil, err
+	}
+	participantID, err := s.resolveParticipantID(ctx, req)
+	if err != nil {
 		return nil, err
 	}
 	thread, err := s.store.AddParticipant(ctx, threadID, participantID, req.GetPassive())
@@ -282,10 +282,6 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
 	}
-	senderID, err := parseUUID(req.GetSenderId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "sender_id: %v", err)
-	}
 	if req.GetBody() == "" && len(req.GetFileIds()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "body or file_ids must be provided")
 	}
@@ -300,6 +296,16 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 	identityID, err := identityIDFromContext(ctx)
 	if err != nil {
 		return nil, err
+	}
+	senderID := identityID
+	if senderValue := strings.TrimSpace(req.GetSenderId()); senderValue != "" {
+		senderID, err = parseUUID(senderValue)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "sender_id: %v", err)
+		}
+		if senderID != identityID {
+			return nil, status.Error(codes.PermissionDenied, "permission denied")
+		}
 	}
 	if err := s.requireAllowed(ctx, identityID, "can_write", fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())); err != nil {
 		return nil, err
@@ -320,6 +326,13 @@ func (s *Server) GetThreads(ctx context.Context, req *threadsv1.GetThreadsReques
 	participantID, err := parseUUID(req.GetParticipantId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if participantID != identityID {
+		return nil, status.Error(codes.PermissionDenied, "permission denied")
 	}
 	var cursor *store.ThreadCursor
 	if token := req.GetPageToken(); token != "" {
