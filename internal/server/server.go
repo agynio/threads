@@ -327,16 +327,16 @@ func (s *Server) GetThread(ctx context.Context, req *threadsv1.GetThreadRequest)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
 	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	thread, err := s.store.GetThread(ctx, threadID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 	if thread.OrganizationID == nil {
 		return nil, status.Error(codes.NotFound, store.ErrThreadNotFound.Error())
-	}
-	identityID, err := identityIDFromContext(ctx)
-	if err != nil {
-		return nil, err
 	}
 	if err := s.checkCanViewThreads(ctx, identityID, *thread.OrganizationID); err != nil {
 		return nil, err
@@ -554,19 +554,36 @@ func (s *Server) organizationIDForThread(ctx context.Context, organizationIDValu
 }
 
 func (s *Server) organizationIDForRequest(ctx context.Context, organizationIDValue *string, missingMessage string) (uuid.UUID, error) {
+	var requestedID *uuid.UUID
 	if organizationIDValue != nil {
 		organizationID, err := parseUUID(strings.TrimSpace(*organizationIDValue))
 		if err != nil {
 			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 		}
-		return organizationID, nil
+		requestedID = &organizationID
 	}
 	organizationID, ok, err := organizationIDFromContext(ctx)
 	if err != nil {
 		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 	if ok {
+		if requestedID != nil && *requestedID != organizationID {
+			return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id does not match identity organization")
+		}
 		return organizationID, nil
+	}
+	if requestedID != nil {
+		if isAgentIdentity(ctx) {
+			identityOrgID, err := s.organizationIDFromIdentity(ctx, missingMessage)
+			if err != nil {
+				return uuid.UUID{}, err
+			}
+			if identityOrgID != *requestedID {
+				return uuid.UUID{}, status.Error(codes.InvalidArgument, "organization_id does not match identity organization")
+			}
+			return identityOrgID, nil
+		}
+		return *requestedID, nil
 	}
 	return s.organizationIDFromIdentity(ctx, missingMessage)
 }
@@ -636,6 +653,15 @@ func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
 		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "identity_id: %v", err)
 	}
 	return parsedID, nil
+}
+
+func isAgentIdentity(ctx context.Context) bool {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return false
+	}
+	identityType := metadataValue(md, identityTypeMetadataKey)
+	return strings.EqualFold(identityType, agentIdentityType)
 }
 
 func (s *Server) checkCanViewThreads(ctx context.Context, identityID, organizationID uuid.UUID) error {

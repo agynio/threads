@@ -388,6 +388,33 @@ func TestCreateThreadMissingIdentityMetadataDefaultsActive(t *testing.T) {
 	}
 }
 
+func TestCreateThreadRejectsMismatchedOrganizationID(t *testing.T) {
+	organizationID := uuid.New()
+	otherOrganizationID := uuid.New()
+	participantID := uuid.New()
+	otherOrgValue := otherOrganizationID.String()
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String()))
+	_, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{
+		OrganizationId: &otherOrgValue,
+		ParticipantIds: []string{participantID.String()},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
+	}
+	if st.Message() != "organization_id does not match identity organization" {
+		t.Fatalf("expected organization_id mismatch, got %s", st.Message())
+	}
+}
+
 func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 	threadID := uuid.New()
 	organizationID := uuid.New()
@@ -763,7 +790,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 
 	srv := New(storeStub, nil, nil, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", uuid.New().String()))
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String()))
 	resp, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId:       threadID.String(),
 		OrganizationId: &orgIDValue,
@@ -1236,7 +1263,7 @@ func TestGetOrganizationThreadsPagination(t *testing.T) {
 		t.Fatal("expected authorization check")
 	}
 	if !storeCalled {
-				t.Fatal("expected GetOrganizationThreads to be called")
+		t.Fatal("expected GetOrganizationThreads to be called")
 	}
 	if len(resp.GetThreads()) != 1 {
 		t.Fatalf("expected 1 thread, got %d", len(resp.GetThreads()))
@@ -1298,6 +1325,7 @@ func TestGetThreadAuthorizationDenied(t *testing.T) {
 
 func TestGetThreadMissingOrganizationID(t *testing.T) {
 	threadID := uuid.New()
+	identityID := uuid.New()
 	storeStub := &stubThreadStore{
 		t: t,
 		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
@@ -1314,7 +1342,8 @@ func TestGetThreadMissingOrganizationID(t *testing.T) {
 	}
 
 	srv := New(storeStub, nil, nil, nil, nil, nil)
-	_, err := srv.GetThread(context.Background(), &threadsv1.GetThreadRequest{ThreadId: threadID.String()})
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.GetThread(ctx, &threadsv1.GetThreadRequest{ThreadId: threadID.String()})
 	if err == nil {
 		t.Fatal("expected error")
 	}
