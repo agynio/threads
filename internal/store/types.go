@@ -31,11 +31,13 @@ func ParseThreadStatus(value int16) (ThreadStatus, error) {
 }
 
 type Thread struct {
-	ID           uuid.UUID
-	Participants []Participant
-	Status       ThreadStatus
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID             uuid.UUID
+	OrganizationID *uuid.UUID
+	MessageCount   int32
+	Participants   []Participant
+	Status         ThreadStatus
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type Participant struct {
@@ -58,8 +60,20 @@ type Message struct {
 	CreatedAt time.Time
 }
 
+type MessageOrder int
+
+const (
+	MessageOrderOldestFirst MessageOrder = iota
+	MessageOrderNewestFirst
+)
+
 type ThreadCursor struct {
 	UpdatedAt time.Time
+	ThreadID  uuid.UUID
+}
+
+type OrganizationThreadCursor struct {
+	CreatedAt time.Time
 	ThreadID  uuid.UUID
 }
 
@@ -71,6 +85,11 @@ type MessageCursor struct {
 type ThreadListResult struct {
 	Threads    []Thread
 	NextCursor *ThreadCursor
+}
+
+type OrganizationThreadListResult struct {
+	Threads    []Thread
+	NextCursor *OrganizationThreadCursor
 }
 
 type MessageListResult struct {

@@ -9,10 +9,14 @@ import (
 
 func toProtoThread(thread store.Thread) *threadsv1.Thread {
 	protoThread := &threadsv1.Thread{
-		Id:        thread.ID.String(),
-		Status:    toProtoThreadStatus(thread.Status),
-		CreatedAt: timestamppb.New(thread.CreatedAt),
-		UpdatedAt: timestamppb.New(thread.UpdatedAt),
+		Id:           thread.ID.String(),
+		Status:       toProtoThreadStatus(thread.Status),
+		CreatedAt:    timestamppb.New(thread.CreatedAt),
+		UpdatedAt:    timestamppb.New(thread.UpdatedAt),
+		MessageCount: thread.MessageCount,
+	}
+	if thread.OrganizationID != nil {
+		protoThread.OrganizationId = thread.OrganizationID.String()
 	}
 	if len(thread.Participants) > 0 {
 		protoThread.Participants = make([]*threadsv1.Participant, len(thread.Participants))

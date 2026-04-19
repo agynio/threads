@@ -6,6 +6,7 @@ func TestFromEnvDefaults(t *testing.T) {
 	t.Setenv("GRPC_ADDRESS", "")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/threads")
 	t.Setenv("NOTIFICATIONS_ADDRESS", "")
+	t.Setenv("AUTHORIZATION_ADDRESS", "")
 	t.Setenv("IDENTITY_ADDRESS", "")
 	t.Setenv("METERING_SERVICE_ADDRESS", "")
 
@@ -22,6 +23,9 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.NotificationsAddress != "notifications:50051" {
 		t.Fatalf("expected notifications address notifications:50051, got %q", cfg.NotificationsAddress)
 	}
+	if cfg.AuthorizationAddress != "authorization:50051" {
+		t.Fatalf("expected authorization address authorization:50051, got %q", cfg.AuthorizationAddress)
+	}
 	if cfg.IdentityAddress != "identity:50051" {
 		t.Fatalf("expected identity address identity:50051, got %q", cfg.IdentityAddress)
 	}
@@ -34,6 +38,7 @@ func TestFromEnvOverrides(t *testing.T) {
 	t.Setenv("GRPC_ADDRESS", "0.0.0.0:9999")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@db:5432/threads")
 	t.Setenv("NOTIFICATIONS_ADDRESS", "notifications.internal:6000")
+	t.Setenv("AUTHORIZATION_ADDRESS", "authorization.internal:6003")
 	t.Setenv("IDENTITY_ADDRESS", "identity.internal:6001")
 	t.Setenv("METERING_SERVICE_ADDRESS", "metering.internal:6002")
 
@@ -47,6 +52,9 @@ func TestFromEnvOverrides(t *testing.T) {
 	if cfg.NotificationsAddress != "notifications.internal:6000" {
 		t.Fatalf("expected notifications address override, got %q", cfg.NotificationsAddress)
 	}
+	if cfg.AuthorizationAddress != "authorization.internal:6003" {
+		t.Fatalf("expected authorization address override, got %q", cfg.AuthorizationAddress)
+	}
 	if cfg.IdentityAddress != "identity.internal:6001" {
 		t.Fatalf("expected identity address override, got %q", cfg.IdentityAddress)
 	}
@@ -59,6 +67,7 @@ func TestFromEnvRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("GRPC_ADDRESS", "")
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("NOTIFICATIONS_ADDRESS", "")
+	t.Setenv("AUTHORIZATION_ADDRESS", "")
 	t.Setenv("IDENTITY_ADDRESS", "")
 	t.Setenv("METERING_SERVICE_ADDRESS", "")
 

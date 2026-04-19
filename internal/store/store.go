@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
-
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,30 +42,23 @@ type queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func loadThreadRow(ctx context.Context, q queryer, id uuid.UUID, forUpdate bool) (ThreadStatus, time.Time, time.Time, error) {
-	query := "SELECT status, created_at, updated_at FROM threads WHERE id = $1"
+func loadThreadRow(ctx context.Context, q queryer, id uuid.UUID, forUpdate bool) (Thread, error) {
+	query := "SELECT id, status, created_at, updated_at, organization_id, message_count FROM threads WHERE id = $1"
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
-	var statusValue int16
-	var createdAt time.Time
-	var updatedAt time.Time
-	err := q.QueryRow(ctx, query, id).Scan(&statusValue, &createdAt, &updatedAt)
+	thread, err := scanThreadRow(q.QueryRow(ctx, query, id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ThreadStatusUnspecified, time.Time{}, time.Time{}, ErrThreadNotFound
+			return Thread{}, ErrThreadNotFound
 		}
-		return ThreadStatusUnspecified, time.Time{}, time.Time{}, err
+		return Thread{}, err
 	}
-	status, err := ParseThreadStatus(statusValue)
-	if err != nil {
-		return ThreadStatusUnspecified, time.Time{}, time.Time{}, fmt.Errorf("invalid thread status: %w", err)
-	}
-	return status, createdAt, updatedAt, nil
+	return thread, nil
 }
 
 func loadThread(ctx context.Context, q queryer, id uuid.UUID) (Thread, error) {
-	status, createdAt, updatedAt, err := loadThreadRow(ctx, q, id, false)
+	thread, err := loadThreadRow(ctx, q, id, false)
 	if err != nil {
 		return Thread{}, err
 	}
@@ -74,13 +66,8 @@ func loadThread(ctx context.Context, q queryer, id uuid.UUID) (Thread, error) {
 	if err != nil {
 		return Thread{}, err
 	}
-	return Thread{
-		ID:           id,
-		Status:       status,
-		CreatedAt:    createdAt,
-		UpdatedAt:    updatedAt,
-		Participants: participants,
-	}, nil
+	thread.Participants = participants
+	return thread, nil
 }
 
 func loadParticipants(ctx context.Context, q queryer, threadID uuid.UUID) ([]Participant, error) {
@@ -133,4 +120,27 @@ func stringsToUUIDs(values []string) ([]uuid.UUID, error) {
 		ids[i] = id
 	}
 	return ids, nil
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanThreadRow(scanner rowScanner) (Thread, error) {
+	var thread Thread
+	var statusValue int16
+	var organizationID pgtype.UUID
+	if err := scanner.Scan(&thread.ID, &statusValue, &thread.CreatedAt, &thread.UpdatedAt, &organizationID, &thread.MessageCount); err != nil {
+		return Thread{}, err
+	}
+	status, err := ParseThreadStatus(statusValue)
+	if err != nil {
+		return Thread{}, fmt.Errorf("invalid thread status: %w", err)
+	}
+	thread.Status = status
+	if organizationID.Valid {
+		orgID := uuid.UUID(organizationID.Bytes)
+		thread.OrganizationID = &orgID
+	}
+	return thread, nil
 }
