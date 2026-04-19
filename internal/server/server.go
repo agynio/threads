@@ -39,6 +39,7 @@ const (
 	meteringTimeout           = 5 * time.Second
 	identityObjectPrefix      = "identity:"
 	organizationObjectPrefix  = "organization:"
+	threadObjectPrefix        = "thread:"
 )
 
 type threadStore interface {
@@ -64,6 +65,7 @@ type agentsService interface {
 
 type authorizationChecker interface {
 	Check(ctx context.Context, in *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error)
+	Write(ctx context.Context, in *authorizationv1.WriteRequest, opts ...grpc.CallOption) (*authorizationv1.WriteResponse, error)
 }
 
 type notifierPublisher interface {
@@ -149,6 +151,13 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 		}
 		organizationID = orgID
 	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireAllowed(ctx, identityID, "can_create_thread", fmt.Sprintf("%s%s", organizationObjectPrefix, organizationID.String())); err != nil {
+		return nil, err
+	}
 	capacity := len(resolved)
 	if hasInitiator {
 		capacity++
@@ -162,6 +171,26 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 	thread, err := s.store.CreateThread(ctx, organizationID, participants)
 	if err != nil {
 		return nil, toStatusError(err)
+	}
+	if thread.OrganizationID == nil {
+		return nil, status.Error(codes.Internal, "thread organization_id missing")
+	}
+	threadObject := fmt.Sprintf("%s%s", threadObjectPrefix, thread.ID.String())
+	writes := make([]*authorizationv1.TupleKey, 0, 1+len(thread.Participants))
+	writes = append(writes, &authorizationv1.TupleKey{
+		User:     fmt.Sprintf("%s%s", organizationObjectPrefix, thread.OrganizationID.String()),
+		Relation: "org",
+		Object:   threadObject,
+	})
+	for _, participant := range thread.Participants {
+		writes = append(writes, &authorizationv1.TupleKey{
+			User:     fmt.Sprintf("%s%s", identityObjectPrefix, participant.ID.String()),
+			Relation: "participant",
+			Object:   threadObject,
+		})
+	}
+	if err := s.writeTuples(ctx, writes); err != nil {
+		return nil, err
 	}
 	s.recordThreadCreated(ctx, thread)
 	return &threadsv1.CreateThreadResponse{Thread: toProtoThread(thread)}, nil
@@ -184,7 +213,32 @@ func (s *Server) ArchiveThread(ctx context.Context, req *threadsv1.ArchiveThread
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
 	}
-	thread, err := s.store.ArchiveThread(ctx, threadID)
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	thread, err := s.store.GetThread(ctx, threadID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	if thread.OrganizationID == nil {
+		return nil, status.Error(codes.NotFound, store.ErrThreadNotFound.Error())
+	}
+	threadObject := fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())
+	allowed, err := s.checkAllowed(ctx, identityID, "participant", threadObject)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		allowed, err = s.checkAllowed(ctx, identityID, "owner", fmt.Sprintf("%s%s", organizationObjectPrefix, thread.OrganizationID.String()))
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			return nil, status.Error(codes.PermissionDenied, "permission denied")
+		}
+	}
+	thread, err = s.store.ArchiveThread(ctx, threadID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -200,9 +254,25 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 	if err != nil {
 		return nil, err
 	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireAllowed(ctx, identityID, "can_add_participant", fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())); err != nil {
+		return nil, err
+	}
 	thread, err := s.store.AddParticipant(ctx, threadID, participantID, req.GetPassive())
 	if err != nil {
 		return nil, toStatusError(err)
+	}
+	if err := s.writeTuples(ctx, []*authorizationv1.TupleKey{
+		{
+			User:     fmt.Sprintf("%s%s", identityObjectPrefix, participantID.String()),
+			Relation: "participant",
+			Object:   fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String()),
+		},
+	}); err != nil {
+		return nil, err
 	}
 	return &threadsv1.AddParticipantResponse{Thread: toProtoThread(thread)}, nil
 }
@@ -226,6 +296,13 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 			return nil, status.Errorf(codes.InvalidArgument, "file_ids[%d]: %v", i, err)
 		}
 		fileIDs[i] = id
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireAllowed(ctx, identityID, "can_write", fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())); err != nil {
+		return nil, err
 	}
 
 	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs)
@@ -338,7 +415,7 @@ func (s *Server) GetThread(ctx context.Context, req *threadsv1.GetThreadRequest)
 	if thread.OrganizationID == nil {
 		return nil, status.Error(codes.NotFound, store.ErrThreadNotFound.Error())
 	}
-	if err := s.checkCanViewThreads(ctx, identityID, *thread.OrganizationID); err != nil {
+	if err := s.requireAllowed(ctx, identityID, "can_read", fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())); err != nil {
 		return nil, err
 	}
 	return &threadsv1.GetThreadResponse{Thread: toProtoThread(thread)}, nil
@@ -364,6 +441,13 @@ func (s *Server) GetMessages(ctx context.Context, req *threadsv1.GetMessagesRequ
 		}
 		cursor = &tokenCursor
 	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireAllowed(ctx, identityID, "can_read", fmt.Sprintf("%s%s", threadObjectPrefix, threadID.String())); err != nil {
+		return nil, err
+	}
 
 	result, err := s.store.ListMessages(ctx, threadID, req.GetPageSize(), cursor, order)
 	if err != nil {
@@ -387,6 +471,13 @@ func (s *Server) GetUnackedMessages(ctx context.Context, req *threadsv1.GetUnack
 	participantID, err := parseUUID(req.GetParticipantId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if identityID != participantID {
+		return nil, status.Error(codes.PermissionDenied, "permission denied")
 	}
 	var threadID *uuid.UUID
 	if req.ThreadId != nil {
@@ -430,6 +521,13 @@ func (s *Server) AckMessages(ctx context.Context, req *threadsv1.AckMessagesRequ
 	participantID, err := parseUUID(req.GetParticipantId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if identityID != participantID {
+		return nil, status.Error(codes.PermissionDenied, "permission denied")
 	}
 	if len(req.GetMessageIds()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "message_ids must be provided")
@@ -664,24 +762,47 @@ func isAgentIdentity(ctx context.Context) bool {
 	return strings.EqualFold(identityType, agentIdentityType)
 }
 
-func (s *Server) checkCanViewThreads(ctx context.Context, identityID, organizationID uuid.UUID) error {
+func (s *Server) checkAllowed(ctx context.Context, identityID uuid.UUID, relation, object string) (bool, error) {
 	if s.authorization == nil {
-		return status.Error(codes.Internal, "authorization service not configured")
+		return false, status.Error(codes.Internal, "authorization service not configured")
 	}
 	response, err := s.authorization.Check(ctx, &authorizationv1.CheckRequest{
 		TupleKey: &authorizationv1.TupleKey{
 			User:     fmt.Sprintf("%s%s", identityObjectPrefix, identityID.String()),
-			Relation: "can_view_threads",
-			Object:   fmt.Sprintf("%s%s", organizationObjectPrefix, organizationID.String()),
+			Relation: relation,
+			Object:   object,
 		},
 	})
 	if err != nil {
-		return status.Errorf(codes.Internal, "authorization check: %v", err)
+		return false, status.Errorf(codes.Internal, "authorization check: %v", err)
 	}
-	if !response.GetAllowed() {
+	return response.GetAllowed(), nil
+}
+
+func (s *Server) requireAllowed(ctx context.Context, identityID uuid.UUID, relation, object string) error {
+	allowed, err := s.checkAllowed(ctx, identityID, relation, object)
+	if err != nil {
+		return err
+	}
+	if !allowed {
 		return status.Error(codes.PermissionDenied, "permission denied")
 	}
 	return nil
+}
+
+func (s *Server) writeTuples(ctx context.Context, writes []*authorizationv1.TupleKey) error {
+	if s.authorization == nil {
+		return status.Error(codes.Internal, "authorization service not configured")
+	}
+	_, err := s.authorization.Write(ctx, &authorizationv1.WriteRequest{Writes: writes})
+	if err != nil {
+		return status.Errorf(codes.Internal, "authorization write: %v", err)
+	}
+	return nil
+}
+
+func (s *Server) checkCanViewThreads(ctx context.Context, identityID, organizationID uuid.UUID) error {
+	return s.requireAllowed(ctx, identityID, "can_view_threads", fmt.Sprintf("%s%s", organizationObjectPrefix, organizationID.String()))
 }
 
 func threadStatusFilterFromProto(status threadsv1.ThreadStatus) (*store.ThreadStatus, error) {
