@@ -26,13 +26,6 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if thread.Status == ThreadStatusArchived {
 			return ErrThreadArchived
 		}
-		var isParticipant bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM thread_participants WHERE thread_id = $1 AND participant_id = $2)`, threadID, senderID).Scan(&isParticipant); err != nil {
-			return err
-		}
-		if !isParticipant {
-			return ErrParticipantNotInThread
-		}
 		now := time.Now().UTC()
 		messageID := uuid.New()
 		fileIDArray := pgtype.FlatArray[string](uuidsToStrings(fileIDs))
