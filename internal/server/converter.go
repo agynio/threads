@@ -1,6 +1,8 @@
 package server
 
 import (
+	"fmt"
+
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -52,7 +54,9 @@ func toProtoThreadStatus(status store.ThreadStatus) threadsv1.ThreadStatus {
 		return threadsv1.ThreadStatus_THREAD_STATUS_ACTIVE
 	case store.ThreadStatusArchived:
 		return threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED
+	case store.ThreadStatusDegraded:
+		return threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED
 	default:
-		return threadsv1.ThreadStatus_THREAD_STATUS_UNSPECIFIED
+		panic(fmt.Sprintf("unsupported thread status: %d", status))
 	}
 }

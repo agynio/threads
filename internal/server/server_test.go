@@ -22,6 +22,7 @@ type stubThreadStore struct {
 	t                *testing.T
 	createThreadFn   func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
 	archiveThreadFn  func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	degradeThreadFn  func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	addParticipantFn func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
 	sendMessageFn    func(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
 	getThreadFn      func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
@@ -50,6 +51,14 @@ func (s *stubThreadStore) ArchiveThread(ctx context.Context, threadID uuid.UUID)
 		return store.Thread{}, nil
 	}
 	return s.archiveThreadFn(ctx, threadID)
+}
+
+func (s *stubThreadStore) DegradeThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error) {
+	if s.degradeThreadFn == nil {
+		s.unexpectedCall("DegradeThread")
+		return store.Thread{}, nil
+	}
+	return s.degradeThreadFn(ctx, threadID)
 }
 
 func (s *stubThreadStore) AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error) {
@@ -985,6 +994,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 	threadID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 
 	storeStub := &stubThreadStore{
@@ -1000,7 +1010,12 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 			if passive {
 				t.Fatalf("expected passive false, got %v", passive)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 
@@ -1025,6 +1040,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 	threadID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 
 	storeStub := &stubThreadStore{
@@ -1037,7 +1053,12 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 			if participantArg != participantID {
 				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 
@@ -1215,6 +1236,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 	threadID := uuid.New()
 	organizationID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 	identityCalled := false
 
@@ -1228,7 +1250,12 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 			if participantArg != participantID {
 				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 	identityStub := &stubIdentityResolver{
@@ -1271,6 +1298,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T)
 	organizationID := uuid.New()
 	agentID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 	identityCalled := false
 	agentCalled := false
@@ -1285,7 +1313,12 @@ func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T)
 			if participantArg != participantID {
 				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 	identityStub := &stubIdentityResolver{
@@ -1511,6 +1544,43 @@ func TestArchiveThreadAuthorizationDenied(t *testing.T) {
 	}
 }
 
+func TestDegradeThreadNoAuth(t *testing.T) {
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		degradeThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			storeCalled = true
+			if id != threadID {
+				t.Fatalf("expected thread id %s, got %s", threadID, id)
+			}
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusDegraded,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil, nil)
+	resp, err := srv.DegradeThread(context.Background(), &threadsv1.DegradeThreadRequest{ThreadId: threadID.String(), Reason: "needs review"})
+	if err != nil {
+		t.Fatalf("DegradeThread returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected DegradeThread to be called")
+	}
+	if resp.GetThread().GetId() != threadID.String() {
+		t.Fatalf("expected thread id %s, got %s", threadID, resp.GetThread().GetId())
+	}
+	if resp.GetThread().GetStatus() != threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED {
+		t.Fatalf("expected degraded status, got %s", resp.GetThread().GetStatus())
+	}
+}
+
 func TestSendMessageAuthorizationDenied(t *testing.T) {
 	threadID := uuid.New()
 	identityID := uuid.New()
@@ -1608,6 +1678,48 @@ func TestSendMessageRejectsSenderMismatch(t *testing.T) {
 	}
 	if storeCalled {
 		t.Fatal("expected SendMessage not to be called")
+	}
+}
+
+func TestSendMessageRejectsDegradedThread(t *testing.T) {
+	threadID := uuid.New()
+	identityID := uuid.New()
+	storeCalled := false
+	findStatus := func(err error) *status.Status {
+		st, _ := status.FromError(err)
+		return st
+	}
+
+	storeStub := &stubThreadStore{
+		t: t,
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+			storeCalled = true
+			if threadArg != threadID {
+				t.Fatalf("expected thread id %s, got %s", threadID, threadArg)
+			}
+			return store.SendMessageResult{}, store.ErrThreadDegraded
+		},
+	}
+	authStub := allowAuthStub(t)
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.SendMessage(ctx, &threadsv1.SendMessageRequest{ThreadId: threadID.String(), Body: "hi"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st := findStatus(err)
+	if st == nil {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %s: %s", st.Code(), st.Message())
+	}
+	if st.Message() != "thread is degraded" {
+		t.Fatalf("expected message 'thread is degraded', got %q", st.Message())
+	}
+	if !storeCalled {
+		t.Fatal("expected SendMessage to be called")
 	}
 }
 
@@ -1781,6 +1893,37 @@ func TestGetOrganizationThreadsPagination(t *testing.T) {
 	}
 	if resp.GetNextPageToken() != expectedNextToken {
 		t.Fatalf("expected next page token %s, got %s", expectedNextToken, resp.GetNextPageToken())
+	}
+}
+
+func TestGetOrganizationThreadsDegradedStatusFilter(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
+			if status == nil || *status != store.ThreadStatusDegraded {
+				t.Fatalf("expected degraded status filter, got %v", status)
+			}
+			return store.OrganizationThreadListResult{}, nil
+		},
+	}
+	authStub := allowAuthStub(t)
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.GetOrganizationThreads(ctx, &threadsv1.GetOrganizationThreadsRequest{OrganizationId: organizationID.String(), Status: threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED})
+	if err != nil {
+		t.Fatalf("GetOrganizationThreads returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected GetOrganizationThreads to be called")
 	}
 }
 

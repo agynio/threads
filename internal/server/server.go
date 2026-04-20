@@ -45,6 +45,7 @@ const (
 type threadStore interface {
 	CreateThread(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
 	ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	DegradeThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
 	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
 	GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
@@ -243,6 +244,24 @@ func (s *Server) ArchiveThread(ctx context.Context, req *threadsv1.ArchiveThread
 		return nil, toStatusError(err)
 	}
 	return &threadsv1.ArchiveThreadResponse{Thread: toProtoThread(thread)}, nil
+}
+
+func (s *Server) DegradeThread(ctx context.Context, req *threadsv1.DegradeThreadRequest) (*threadsv1.DegradeThreadResponse, error) {
+	threadID, err := parseUUID(req.GetThreadId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
+	}
+	reason := strings.TrimSpace(req.GetReason())
+	if reason == "" {
+		log.Printf("degrade thread requested without reason: thread_id=%s", threadID.String())
+	} else {
+		log.Printf("degrade thread requested: thread_id=%s reason=%s", threadID.String(), reason)
+	}
+	thread, err := s.store.DegradeThread(ctx, threadID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	return &threadsv1.DegradeThreadResponse{Thread: toProtoThread(thread)}, nil
 }
 
 func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipantRequest) (*threadsv1.AddParticipantResponse, error) {
@@ -828,6 +847,9 @@ func threadStatusFilterFromProto(status threadsv1.ThreadStatus) (*store.ThreadSt
 	case threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED:
 		value := store.ThreadStatusArchived
 		return &value, nil
+	case threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED:
+		value := store.ThreadStatusDegraded
+		return &value, nil
 	default:
 		return nil, errors.New("invalid thread status")
 	}
@@ -895,6 +917,8 @@ func toStatusError(err error) error {
 	case errors.Is(err, store.ErrThreadNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, store.ErrThreadArchived):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, store.ErrThreadDegraded):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, store.ErrParticipantNotInThread):
 		return status.Error(codes.InvalidArgument, err.Error())

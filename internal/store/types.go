@@ -10,6 +10,7 @@ import (
 var (
 	ErrThreadNotFound         = errors.New("thread not found")
 	ErrThreadArchived         = errors.New("thread is archived")
+	ErrThreadDegraded         = errors.New("thread is degraded")
 	ErrParticipantNotInThread = errors.New("participant not in thread")
 )
 
@@ -19,11 +20,12 @@ const (
 	ThreadStatusUnspecified ThreadStatus = 0
 	ThreadStatusActive      ThreadStatus = 1
 	ThreadStatusArchived    ThreadStatus = 2
+	ThreadStatusDegraded    ThreadStatus = 3
 )
 
 func ParseThreadStatus(value int16) (ThreadStatus, error) {
 	switch ThreadStatus(value) {
-	case ThreadStatusActive, ThreadStatusArchived:
+	case ThreadStatusActive, ThreadStatusArchived, ThreadStatusDegraded:
 		return ThreadStatus(value), nil
 	default:
 		return ThreadStatusUnspecified, errors.New("invalid thread status")
