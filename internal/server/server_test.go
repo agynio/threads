@@ -994,6 +994,7 @@ func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
 func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 	threadID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 
 	storeStub := &stubThreadStore{
@@ -1009,7 +1010,12 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 			if passive {
 				t.Fatalf("expected passive false, got %v", passive)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 
@@ -1034,6 +1040,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 	threadID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 
 	storeStub := &stubThreadStore{
@@ -1046,7 +1053,12 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 			if participantArg != participantID {
 				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 
@@ -1224,6 +1236,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 	threadID := uuid.New()
 	organizationID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 	identityCalled := false
 
@@ -1237,7 +1250,12 @@ func TestAddParticipantNicknameUsesOrganizationIDFromMetadata(t *testing.T) {
 			if participantArg != participantID {
 				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 	identityStub := &stubIdentityResolver{
@@ -1280,6 +1298,7 @@ func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T)
 	organizationID := uuid.New()
 	agentID := uuid.New()
 	participantID := uuid.New()
+	now := time.Now().UTC()
 	storeCalled := false
 	identityCalled := false
 	agentCalled := false
@@ -1294,7 +1313,12 @@ func TestAddParticipantNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T)
 			if participantArg != participantID {
 				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
 			}
-			return store.Thread{ID: threadID}, nil
+			return store.Thread{
+				ID:        threadID,
+				Status:    store.ThreadStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}, nil
 		},
 	}
 	identityStub := &stubIdentityResolver{

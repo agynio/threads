@@ -251,6 +251,12 @@ func (s *Server) DegradeThread(ctx context.Context, req *threadsv1.DegradeThread
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
 	}
+	reason := strings.TrimSpace(req.GetReason())
+	if reason == "" {
+		log.Printf("degrade thread requested without reason: thread_id=%s", threadID.String())
+	} else {
+		log.Printf("degrade thread requested: thread_id=%s reason=%s", threadID.String(), reason)
+	}
 	thread, err := s.store.DegradeThread(ctx, threadID)
 	if err != nil {
 		return nil, toStatusError(err)
