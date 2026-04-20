@@ -1,0 +1,25 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ .Release.Name }}-degrade-thread
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notPrincipals:
+              - "cluster.local/ns/{{ .Release.Namespace }}/sa/agents-orchestrator"
+              - "cluster.local/ns/{{ .Release.Namespace }}/sa/agents-orchestrator-e2e"
+      to:
+        - operation:
+            methods:
+              - POST
+            paths:
+              - /agynio.api.threads.v1.ThreadsService/DegradeThread

@@ -69,6 +69,35 @@ func (s *Store) ArchiveThread(ctx context.Context, threadID uuid.UUID) (Thread, 
 	return thread, nil
 }
 
+func (s *Store) DegradeThread(ctx context.Context, threadID uuid.UUID) (Thread, error) {
+	var thread Thread
+	err := s.runTx(ctx, func(tx pgx.Tx) error {
+		threadRow, err := loadThreadRow(ctx, tx, threadID, true)
+		if err != nil {
+			return err
+		}
+		if threadRow.Status != ThreadStatusArchived && threadRow.Status != ThreadStatusDegraded {
+			now := time.Now().UTC()
+			row := tx.QueryRow(ctx, `UPDATE threads SET status = $2, updated_at = $3 WHERE id = $1 RETURNING id, status, created_at, updated_at, organization_id, message_count`, threadID, int16(ThreadStatusDegraded), now)
+			threadRow, err = scanThreadRow(row)
+			if err != nil {
+				return err
+			}
+		}
+		participants, err := loadParticipants(ctx, tx, threadID)
+		if err != nil {
+			return err
+		}
+		thread = threadRow
+		thread.Participants = participants
+		return nil
+	})
+	if err != nil {
+		return Thread{}, err
+	}
+	return thread, nil
+}
+
 func (s *Store) AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (Thread, error) {
 	var thread Thread
 	err := s.runTx(ctx, func(tx pgx.Tx) error {

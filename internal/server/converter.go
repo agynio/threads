@@ -52,6 +52,8 @@ func toProtoThreadStatus(status store.ThreadStatus) threadsv1.ThreadStatus {
 		return threadsv1.ThreadStatus_THREAD_STATUS_ACTIVE
 	case store.ThreadStatusArchived:
 		return threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED
+	case store.ThreadStatusDegraded:
+		return threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED
 	default:
 		return threadsv1.ThreadStatus_THREAD_STATUS_UNSPECIFIED
 	}

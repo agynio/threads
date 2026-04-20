@@ -26,6 +26,9 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if thread.Status == ThreadStatusArchived {
 			return ErrThreadArchived
 		}
+		if thread.Status == ThreadStatusDegraded {
+			return ErrThreadDegraded
+		}
 		now := time.Now().UTC()
 		messageID := uuid.New()
 		fileIDArray := pgtype.FlatArray[string](uuidsToStrings(fileIDs))
