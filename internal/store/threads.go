@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func (s *Store) CreateThread(ctx context.Context, organizationID uuid.UUID, participantInputs []ParticipantInput) (Thread, error) {
@@ -194,28 +195,14 @@ func (s *Store) ListThreads(ctx context.Context, participantID uuid.UUID, pageSi
 	return ThreadListResult{Threads: threads, NextCursor: nextCursor}, nil
 }
 
-func (s *Store) ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, status *ThreadStatus, pageSize int32, cursor *OrganizationThreadCursor) (OrganizationThreadListResult, error) {
+func (s *Store) ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, filter OrganizationThreadFilter, sort OrganizationThreadSort, pageSize int32, cursor *OrganizationThreadCursor) (OrganizationThreadListResult, error) {
 	limit := normalizePageSize(pageSize)
-	query := strings.Builder{}
-	query.WriteString(`SELECT id, status, created_at, updated_at, organization_id, message_count
-        FROM threads
-        WHERE organization_id = $1`)
-	args := []any{organizationID}
-	paramIndex := 2
-	if status != nil {
-		query.WriteString(fmt.Sprintf(" AND status = $%d", paramIndex))
-		args = append(args, int16(*status))
-		paramIndex++
+	query, args, err := buildOrganizationThreadsQuery(organizationID, filter, sort, cursor, limit)
+	if err != nil {
+		return OrganizationThreadListResult{}, err
 	}
-	if cursor != nil {
-		query.WriteString(fmt.Sprintf(" AND (created_at, id) < ($%d, $%d)", paramIndex, paramIndex+1))
-		args = append(args, cursor.CreatedAt, cursor.ThreadID)
-		paramIndex += 2
-	}
-	query.WriteString(fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", paramIndex))
-	args = append(args, int(limit)+1)
 
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return OrganizationThreadListResult{}, err
 	}
@@ -224,8 +211,7 @@ func (s *Store) ListOrganizationThreads(ctx context.Context, organizationID uuid
 	threads := make([]Thread, 0, limit)
 	var (
 		nextCursor *OrganizationThreadCursor
-		lastID     uuid.UUID
-		lastTime   time.Time
+		lastThread Thread
 		hasMore    bool
 	)
 	for rows.Next() {
@@ -238,14 +224,17 @@ func (s *Store) ListOrganizationThreads(ctx context.Context, organizationID uuid
 			break
 		}
 		threads = append(threads, thread)
-		lastID = thread.ID
-		lastTime = thread.CreatedAt
+		lastThread = thread
 	}
 	if err := rows.Err(); err != nil {
 		return OrganizationThreadListResult{}, err
 	}
 	if hasMore {
-		nextCursor = &OrganizationThreadCursor{CreatedAt: lastTime, ThreadID: lastID}
+		nextCursorValue, err := organizationThreadCursorFromThread(lastThread, sort.Field)
+		if err != nil {
+			return OrganizationThreadListResult{}, err
+		}
+		nextCursor = &nextCursorValue
 	}
 
 	for i := range threads {
@@ -257,6 +246,118 @@ func (s *Store) ListOrganizationThreads(ctx context.Context, organizationID uuid
 	}
 
 	return OrganizationThreadListResult{Threads: threads, NextCursor: nextCursor}, nil
+}
+
+func buildOrganizationThreadsQuery(organizationID uuid.UUID, filter OrganizationThreadFilter, sort OrganizationThreadSort, cursor *OrganizationThreadCursor, limit int32) (string, []any, error) {
+	sortColumn, err := organizationThreadSortColumn(sort.Field)
+	if err != nil {
+		return "", nil, err
+	}
+	orderDirection, cursorOperator, err := organizationThreadSortDirection(sort.Direction)
+	if err != nil {
+		return "", nil, err
+	}
+
+	query := strings.Builder{}
+	query.WriteString(`SELECT t.id, t.status, t.created_at, t.updated_at, t.organization_id, t.message_count
+        FROM threads t
+        WHERE t.organization_id = $1`)
+	args := []any{organizationID}
+	paramIndex := 2
+	if len(filter.StatusIn) > 0 {
+		statusValues := make([]int16, len(filter.StatusIn))
+		for i, status := range filter.StatusIn {
+			statusValues[i] = int16(status)
+		}
+		query.WriteString(fmt.Sprintf(" AND t.status = ANY($%d)", paramIndex))
+		args = append(args, pgtype.FlatArray[int16](statusValues))
+		paramIndex++
+	}
+	if len(filter.ParticipantIDs) > 0 {
+		query.WriteString(fmt.Sprintf(" AND EXISTS (SELECT 1 FROM thread_participants tp WHERE tp.thread_id = t.id AND tp.participant_id = ANY($%d))", paramIndex))
+		args = append(args, pgtype.FlatArray[uuid.UUID](filter.ParticipantIDs))
+		paramIndex++
+	}
+	if filter.CreatedAfter != nil {
+		query.WriteString(fmt.Sprintf(" AND t.created_at >= $%d", paramIndex))
+		args = append(args, *filter.CreatedAfter)
+		paramIndex++
+	}
+	if filter.CreatedBefore != nil {
+		query.WriteString(fmt.Sprintf(" AND t.created_at < $%d", paramIndex))
+		args = append(args, *filter.CreatedBefore)
+		paramIndex++
+	}
+	if cursor != nil {
+		cursorValue, err := organizationThreadCursorValue(sort.Field, *cursor)
+		if err != nil {
+			return "", nil, err
+		}
+		query.WriteString(fmt.Sprintf(" AND (%s %s $%d OR (%s = $%d AND t.id > $%d))", sortColumn, cursorOperator, paramIndex, sortColumn, paramIndex, paramIndex+1))
+		args = append(args, cursorValue, cursor.ThreadID)
+		paramIndex += 2
+	}
+	query.WriteString(fmt.Sprintf(" ORDER BY %s %s, t.id ASC LIMIT $%d", sortColumn, orderDirection, paramIndex))
+	args = append(args, int(limit)+1)
+	return query.String(), args, nil
+}
+
+func organizationThreadSortColumn(field OrganizationThreadSortField) (string, error) {
+	switch field {
+	case OrganizationThreadSortFieldCreated:
+		return "t.created_at", nil
+	case OrganizationThreadSortFieldUpdated:
+		return "t.updated_at", nil
+	case OrganizationThreadSortFieldMessageCount:
+		return "t.message_count", nil
+	case OrganizationThreadSortFieldStatus:
+		return "t.status", nil
+	default:
+		return "", fmt.Errorf("unsupported sort field: %d", field)
+	}
+}
+
+func organizationThreadSortDirection(direction SortDirection) (string, string, error) {
+	switch direction {
+	case SortDirectionAsc:
+		return "ASC", ">", nil
+	case SortDirectionDesc:
+		return "DESC", "<", nil
+	default:
+		return "", "", fmt.Errorf("unsupported sort direction: %d", direction)
+	}
+}
+
+func organizationThreadCursorValue(field OrganizationThreadSortField, cursor OrganizationThreadCursor) (any, error) {
+	switch field {
+	case OrganizationThreadSortFieldCreated:
+		return cursor.CreatedAt, nil
+	case OrganizationThreadSortFieldUpdated:
+		return cursor.UpdatedAt, nil
+	case OrganizationThreadSortFieldMessageCount:
+		return cursor.MessageCount, nil
+	case OrganizationThreadSortFieldStatus:
+		return int16(cursor.Status), nil
+	default:
+		return nil, fmt.Errorf("unsupported sort field: %d", field)
+	}
+}
+
+func organizationThreadCursorFromThread(thread Thread, field OrganizationThreadSortField) (OrganizationThreadCursor, error) {
+	cursor := OrganizationThreadCursor{ThreadID: thread.ID}
+	switch field {
+	case OrganizationThreadSortFieldCreated:
+		cursor.CreatedAt = thread.CreatedAt
+	case OrganizationThreadSortFieldUpdated:
+		cursor.UpdatedAt = thread.UpdatedAt
+	case OrganizationThreadSortFieldMessageCount:
+		cursor.MessageCount = thread.MessageCount
+	case OrganizationThreadSortFieldStatus:
+		cursor.Status = thread.Status
+	default:
+		return OrganizationThreadCursor{}, fmt.Errorf("unsupported sort field: %d", field)
+	}
+	return cursor, nil
 }
 
 func (s *Store) GetThread(ctx context.Context, threadID uuid.UUID) (Thread, error) {

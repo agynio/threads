@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	threadsv1 "github.com/agynio/threads/.gen/go/agynio/api/threads/v1"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/agynio/threads/internal/store"
@@ -29,6 +30,21 @@ func toProtoThread(thread store.Thread) *threadsv1.Thread {
 				Passive:  participant.Passive,
 			}
 		}
+	}
+	return protoThread
+}
+
+func toProtoThreadWithNicknames(thread store.Thread, nicknames map[uuid.UUID]string) *threadsv1.Thread {
+	protoThread := toProtoThread(thread)
+	if len(thread.Participants) == 0 || len(nicknames) == 0 {
+		return protoThread
+	}
+	for i, participant := range thread.Participants {
+		nickname, ok := nicknames[participant.ID]
+		if !ok {
+			continue
+		}
+		protoThread.Participants[i].Nickname = nickname
 	}
 	return protoThread
 }
