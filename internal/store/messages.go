@@ -206,6 +206,31 @@ func (s *Store) ListUnackedMessages(ctx context.Context, participantID uuid.UUID
 	return MessageListResult{Messages: messages, NextCursor: nextCursor}, nil
 }
 
+func (s *Store) GetUnackedMessageCounts(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error) {
+	rows, err := s.pool.Query(ctx, `SELECT thread_id, COUNT(*) FROM message_recipients WHERE participant_id = $1 AND acked_at IS NULL GROUP BY thread_id`, participantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[uuid.UUID]int32)
+	for rows.Next() {
+		var threadID uuid.UUID
+		var count int64
+		if err := rows.Scan(&threadID, &count); err != nil {
+			return nil, err
+		}
+		if count > int64(^uint32(0)>>1) {
+			return nil, fmt.Errorf("unacked count overflow: %d", count)
+		}
+		counts[threadID] = int32(count)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 func buildUnackedMessagesQuery(participantID uuid.UUID, threadID *uuid.UUID, cursor *MessageCursor, limit int32) (string, []any) {
 	query := strings.Builder{}
 	query.WriteString(`SELECT m.id, m.thread_id, m.sender_id, m.body, m.file_ids, m.created_at

@@ -54,6 +54,7 @@ type threadStore interface {
 	ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
 	ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
 	ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
+	GetUnackedMessageCounts(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
 	AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
 }
 
@@ -616,6 +617,33 @@ func (s *Server) GetUnackedMessages(ctx context.Context, req *threadsv1.GetUnack
 			return nil, status.Errorf(codes.Internal, "encode page token: %v", err)
 		}
 		resp.NextPageToken = token
+	}
+	return resp, nil
+}
+
+func (s *Server) GetUnackedMessageCounts(ctx context.Context, req *threadsv1.GetUnackedMessageCountsRequest) (*threadsv1.GetUnackedMessageCountsResponse, error) {
+	participantID, err := parseUUID(req.GetParticipantId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "participant_id: %v", err)
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if identityID != participantID {
+		return nil, status.Error(codes.PermissionDenied, "permission denied")
+	}
+
+	counts, err := s.store.GetUnackedMessageCounts(ctx, participantID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	resp := &threadsv1.GetUnackedMessageCountsResponse{CountsByThreadId: make(map[string]int32, len(counts))}
+	for threadID, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		resp.CountsByThreadId[threadID.String()] = count
 	}
 	return resp, nil
 }
