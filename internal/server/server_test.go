@@ -32,6 +32,7 @@ type stubThreadStore struct {
 	listOrgThreadsFn func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
 	listMessagesFn   func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
 	listUnackedFn    func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
+	unackedCountsFn  func(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
 	ackMessagesFn    func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
 }
 
@@ -115,6 +116,14 @@ func (s *stubThreadStore) ListUnackedMessages(ctx context.Context, participantID
 		return store.MessageListResult{}, nil
 	}
 	return s.listUnackedFn(ctx, participantID, threadID, pageSize, cursor)
+}
+
+func (s *stubThreadStore) GetUnackedMessageCounts(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error) {
+	if s.unackedCountsFn == nil {
+		s.unexpectedCall("GetUnackedMessageCounts")
+		return nil, nil
+	}
+	return s.unackedCountsFn(ctx, participantID)
 }
 
 func (s *stubThreadStore) AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error) {
@@ -2312,6 +2321,57 @@ func TestGetUnackedMessagesPermissionDenied(t *testing.T) {
 	}
 	if st.Code() != codes.PermissionDenied {
 		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestGetUnackedMessageCountsPermissionDenied(t *testing.T) {
+	participantID := uuid.New()
+	identityID := uuid.New()
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.GetUnackedMessageCounts(ctx, &threadsv1.GetUnackedMessageCountsRequest{ParticipantId: participantID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestGetUnackedMessageCounts(t *testing.T) {
+	participantID := uuid.New()
+	threadID := uuid.New()
+	zeroThreadID := uuid.New()
+	storeCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		unackedCountsFn: func(ctx context.Context, id uuid.UUID) (map[uuid.UUID]int32, error) {
+			storeCalled = true
+			if id != participantID {
+				t.Fatalf("expected participant id %s, got %s", participantID, id)
+			}
+			return map[uuid.UUID]int32{threadID: 3, zeroThreadID: 0}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", participantID.String()))
+	resp, err := srv.GetUnackedMessageCounts(ctx, &threadsv1.GetUnackedMessageCountsRequest{ParticipantId: participantID.String()})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected store call")
+	}
+	expected := map[string]int32{threadID.String(): 3}
+	if !reflect.DeepEqual(resp.GetCountsByThreadId(), expected) {
+		t.Fatalf("expected counts %v, got %v", expected, resp.GetCountsByThreadId())
 	}
 }
 
