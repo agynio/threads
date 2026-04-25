@@ -69,14 +69,47 @@ const (
 	MessageOrderNewestFirst
 )
 
+type SortDirection int
+
+const (
+	SortDirectionUnspecified SortDirection = iota
+	SortDirectionAsc
+	SortDirectionDesc
+)
+
+type OrganizationThreadSortField int
+
+const (
+	OrganizationThreadSortFieldUnspecified OrganizationThreadSortField = iota
+	OrganizationThreadSortFieldCreated
+	OrganizationThreadSortFieldUpdated
+	OrganizationThreadSortFieldMessageCount
+	OrganizationThreadSortFieldStatus
+)
+
+type OrganizationThreadSort struct {
+	Field     OrganizationThreadSortField
+	Direction SortDirection
+}
+
+type OrganizationThreadFilter struct {
+	StatusIn       []ThreadStatus
+	ParticipantIDs []uuid.UUID
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
+}
+
 type ThreadCursor struct {
 	UpdatedAt time.Time
 	ThreadID  uuid.UUID
 }
 
 type OrganizationThreadCursor struct {
-	CreatedAt time.Time
-	ThreadID  uuid.UUID
+	ThreadID     uuid.UUID
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	MessageCount int32
+	Status       ThreadStatus
 }
 
 type MessageCursor struct {

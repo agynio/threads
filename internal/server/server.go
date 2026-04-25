@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ type threadStore interface {
 	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
 	GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	ListThreads(ctx context.Context, participantID uuid.UUID, pageSize int32, cursor *store.ThreadCursor) (store.ThreadListResult, error)
-	ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
+	ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
 	ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
 	ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
 	AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
@@ -58,6 +59,7 @@ type threadStore interface {
 
 type identityResolver interface {
 	ResolveNickname(ctx context.Context, in *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
+	BatchGetNicknames(ctx context.Context, in *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
 }
 
 type agentsService interface {
@@ -383,6 +385,67 @@ func (s *Server) GetThreads(ctx context.Context, req *threadsv1.GetThreadsReques
 	return resp, nil
 }
 
+func (s *Server) ListOrganizationThreads(ctx context.Context, req *threadsv1.ListOrganizationThreadsRequest) (*threadsv1.ListOrganizationThreadsResponse, error) {
+	organizationID, err := parseUUID(req.GetOrganizationId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkCanViewThreads(ctx, identityID, organizationID); err != nil {
+		return nil, err
+	}
+
+	filter, err := listOrganizationThreadsFilterFromProto(req.GetFilter())
+	if err != nil {
+		return nil, err
+	}
+	sortSpec, err := listOrganizationThreadsSortFromProto(req.GetSort())
+	if err != nil {
+		return nil, err
+	}
+
+	var cursor *store.OrganizationThreadCursor
+	if token := req.GetPageToken(); token != "" {
+		tokenOrgID, tokenFilter, tokenSort, tokenCursor, err := store.DecodeOrganizationThreadPageToken(token)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
+		}
+		if tokenOrgID != organizationID {
+			return nil, status.Error(codes.InvalidArgument, "page_token does not match organization")
+		}
+		if !organizationThreadFilterEqual(tokenFilter, filter) || !organizationThreadSortEqual(tokenSort, sortSpec) {
+			return nil, status.Error(codes.InvalidArgument, "page_token does not match request")
+		}
+		cursor = &tokenCursor
+	}
+
+	result, err := s.store.ListOrganizationThreads(ctx, organizationID, filter, sortSpec, req.GetPageSize(), cursor)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	nicknames, err := s.batchResolveNicknames(ctx, organizationID, result.Threads)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &threadsv1.ListOrganizationThreadsResponse{Threads: make([]*threadsv1.Thread, len(result.Threads))}
+	for i, thread := range result.Threads {
+		resp.Threads[i] = toProtoThreadWithNicknames(thread, nicknames)
+	}
+	if result.NextCursor != nil {
+		token, err := store.EncodeOrganizationThreadPageToken(organizationID, filter, sortSpec, *result.NextCursor)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encode page token: %v", err)
+		}
+		resp.NextPageToken = token
+	}
+	return resp, nil
+}
+
 func (s *Server) GetOrganizationThreads(ctx context.Context, req *threadsv1.GetOrganizationThreadsRequest) (*threadsv1.GetOrganizationThreadsResponse, error) {
 	organizationID, err := parseUUID(req.GetOrganizationId())
 	if err != nil {
@@ -400,20 +463,28 @@ func (s *Server) GetOrganizationThreads(ctx context.Context, req *threadsv1.GetO
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "status: %v", err)
 	}
+	filter := store.OrganizationThreadFilter{}
+	if statusFilter != nil {
+		filter.StatusIn = []store.ThreadStatus{*statusFilter}
+	}
+	sortSpec := store.OrganizationThreadSort{Field: store.OrganizationThreadSortFieldCreated, Direction: store.SortDirectionDesc}
 
 	var cursor *store.OrganizationThreadCursor
 	if token := req.GetPageToken(); token != "" {
-		tokenOrgID, tokenCursor, err := store.DecodeOrganizationThreadPageToken(token)
+		tokenOrgID, tokenFilter, tokenSort, tokenCursor, err := store.DecodeOrganizationThreadPageToken(token)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
 		}
 		if tokenOrgID != organizationID {
 			return nil, status.Error(codes.InvalidArgument, "page_token does not match organization")
 		}
+		if !organizationThreadFilterEqual(tokenFilter, filter) || !organizationThreadSortEqual(tokenSort, sortSpec) {
+			return nil, status.Error(codes.InvalidArgument, "page_token does not match request")
+		}
 		cursor = &tokenCursor
 	}
 
-	result, err := s.store.ListOrganizationThreads(ctx, organizationID, statusFilter, req.GetPageSize(), cursor)
+	result, err := s.store.ListOrganizationThreads(ctx, organizationID, filter, sortSpec, req.GetPageSize(), cursor)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -422,7 +493,7 @@ func (s *Server) GetOrganizationThreads(ctx context.Context, req *threadsv1.GetO
 		resp.Threads[i] = toProtoThread(thread)
 	}
 	if result.NextCursor != nil {
-		token, err := store.EncodeOrganizationThreadPageToken(organizationID, *result.NextCursor)
+		token, err := store.EncodeOrganizationThreadPageToken(organizationID, filter, sortSpec, *result.NextCursor)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "encode page token: %v", err)
 		}
@@ -661,7 +732,11 @@ func (s *Server) resolveNickname(ctx context.Context, organizationID uuid.UUID, 
 	if cleaned == "" {
 		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s must be provided", fieldName)
 	}
-	response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
+	identityCtx, err := identityClientContext(ctx)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	response, err := s.identity.ResolveNickname(identityCtx, &identityv1.ResolveNicknameRequest{
 		OrganizationId: organizationID.String(),
 		Nickname:       cleaned,
 	})
@@ -837,6 +912,117 @@ func (s *Server) checkCanViewThreads(ctx context.Context, identityID, organizati
 	return s.requireAllowed(ctx, identityID, "can_view_threads", fmt.Sprintf("%s%s", organizationObjectPrefix, organizationID.String()))
 }
 
+func listOrganizationThreadsFilterFromProto(filter *threadsv1.ListOrganizationThreadsFilter) (store.OrganizationThreadFilter, error) {
+	if filter == nil {
+		return store.OrganizationThreadFilter{}, nil
+	}
+
+	result := store.OrganizationThreadFilter{}
+	if len(filter.GetStatusIn()) > 0 {
+		seen := make(map[store.ThreadStatus]struct{}, len(filter.GetStatusIn()))
+		for i, statusValue := range filter.GetStatusIn() {
+			parsed, err := threadStatusFromProto(statusValue)
+			if err != nil {
+				return store.OrganizationThreadFilter{}, status.Errorf(codes.InvalidArgument, "filter.status_in[%d]: %v", i, err)
+			}
+			if _, ok := seen[parsed]; ok {
+				continue
+			}
+			seen[parsed] = struct{}{}
+			result.StatusIn = append(result.StatusIn, parsed)
+		}
+		sort.Slice(result.StatusIn, func(i, j int) bool { return result.StatusIn[i] < result.StatusIn[j] })
+	}
+
+	if len(filter.GetParticipantIdIn()) > 0 {
+		seen := make(map[uuid.UUID]struct{}, len(filter.GetParticipantIdIn()))
+		for i, raw := range filter.GetParticipantIdIn() {
+			participantID, err := parseUUID(strings.TrimSpace(raw))
+			if err != nil {
+				return store.OrganizationThreadFilter{}, status.Errorf(codes.InvalidArgument, "filter.participant_id_in[%d]: %v", i, err)
+			}
+			if _, ok := seen[participantID]; ok {
+				continue
+			}
+			seen[participantID] = struct{}{}
+			result.ParticipantIDs = append(result.ParticipantIDs, participantID)
+		}
+		sort.Slice(result.ParticipantIDs, func(i, j int) bool { return result.ParticipantIDs[i].String() < result.ParticipantIDs[j].String() })
+	}
+
+	if filter.GetCreatedAfter() != nil {
+		if err := filter.GetCreatedAfter().CheckValid(); err != nil {
+			return store.OrganizationThreadFilter{}, status.Errorf(codes.InvalidArgument, "filter.created_after: %v", err)
+		}
+		value := filter.GetCreatedAfter().AsTime().UTC()
+		result.CreatedAfter = &value
+	}
+	if filter.GetCreatedBefore() != nil {
+		if err := filter.GetCreatedBefore().CheckValid(); err != nil {
+			return store.OrganizationThreadFilter{}, status.Errorf(codes.InvalidArgument, "filter.created_before: %v", err)
+		}
+		value := filter.GetCreatedBefore().AsTime().UTC()
+		result.CreatedBefore = &value
+	}
+
+	return result, nil
+}
+
+func listOrganizationThreadsSortFromProto(sortSpec *threadsv1.ListOrganizationThreadsSort) (store.OrganizationThreadSort, error) {
+	field := threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_CREATED
+	direction := threadsv1.SortDirection_SORT_DIRECTION_DESC
+	if sortSpec != nil {
+		if sortSpec.GetField() != threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_UNSPECIFIED {
+			field = sortSpec.GetField()
+		}
+		if sortSpec.GetDirection() != threadsv1.SortDirection_SORT_DIRECTION_UNSPECIFIED {
+			direction = sortSpec.GetDirection()
+		}
+	}
+
+	var storeField store.OrganizationThreadSortField
+	switch field {
+	case threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_CREATED:
+		storeField = store.OrganizationThreadSortFieldCreated
+	case threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_UPDATED:
+		storeField = store.OrganizationThreadSortFieldUpdated
+	case threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_MESSAGE_COUNT:
+		storeField = store.OrganizationThreadSortFieldMessageCount
+	case threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_STATUS:
+		storeField = store.OrganizationThreadSortFieldStatus
+	default:
+		return store.OrganizationThreadSort{}, status.Error(codes.InvalidArgument, "sort.field: invalid sort field")
+	}
+
+	var storeDirection store.SortDirection
+	switch direction {
+	case threadsv1.SortDirection_SORT_DIRECTION_ASC:
+		storeDirection = store.SortDirectionAsc
+	case threadsv1.SortDirection_SORT_DIRECTION_DESC:
+		storeDirection = store.SortDirectionDesc
+	default:
+		return store.OrganizationThreadSort{}, status.Error(codes.InvalidArgument, "sort.direction: invalid sort direction")
+	}
+
+	return store.OrganizationThreadSort{
+		Field:     storeField,
+		Direction: storeDirection,
+	}, nil
+}
+
+func threadStatusFromProto(status threadsv1.ThreadStatus) (store.ThreadStatus, error) {
+	switch status {
+	case threadsv1.ThreadStatus_THREAD_STATUS_ACTIVE:
+		return store.ThreadStatusActive, nil
+	case threadsv1.ThreadStatus_THREAD_STATUS_ARCHIVED:
+		return store.ThreadStatusArchived, nil
+	case threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED:
+		return store.ThreadStatusDegraded, nil
+	default:
+		return store.ThreadStatusUnspecified, errors.New("invalid thread status")
+	}
+}
+
 func threadStatusFilterFromProto(status threadsv1.ThreadStatus) (*store.ThreadStatus, error) {
 	switch status {
 	case threadsv1.ThreadStatus_THREAD_STATUS_UNSPECIFIED:
@@ -864,6 +1050,88 @@ func messageOrderFromProto(order threadsv1.MessageOrder) (store.MessageOrder, er
 	default:
 		return store.MessageOrderOldestFirst, errors.New("invalid message order")
 	}
+}
+
+func organizationThreadFilterEqual(left, right store.OrganizationThreadFilter) bool {
+	if len(left.StatusIn) != len(right.StatusIn) {
+		return false
+	}
+	for i := range left.StatusIn {
+		if left.StatusIn[i] != right.StatusIn[i] {
+			return false
+		}
+	}
+	if len(left.ParticipantIDs) != len(right.ParticipantIDs) {
+		return false
+	}
+	for i := range left.ParticipantIDs {
+		if left.ParticipantIDs[i] != right.ParticipantIDs[i] {
+			return false
+		}
+	}
+	if (left.CreatedAfter == nil) != (right.CreatedAfter == nil) {
+		return false
+	}
+	if left.CreatedAfter != nil && !left.CreatedAfter.Equal(*right.CreatedAfter) {
+		return false
+	}
+	if (left.CreatedBefore == nil) != (right.CreatedBefore == nil) {
+		return false
+	}
+	if left.CreatedBefore != nil && !left.CreatedBefore.Equal(*right.CreatedBefore) {
+		return false
+	}
+	return true
+}
+
+func organizationThreadSortEqual(left, right store.OrganizationThreadSort) bool {
+	return left.Field == right.Field && left.Direction == right.Direction
+}
+
+func (s *Server) batchResolveNicknames(ctx context.Context, organizationID uuid.UUID, threads []store.Thread) (map[uuid.UUID]string, error) {
+	if s.identity == nil {
+		return nil, status.Error(codes.Internal, "identity service not configured")
+	}
+	participantIDs := make(map[uuid.UUID]struct{})
+	for _, thread := range threads {
+		for _, participant := range thread.Participants {
+			participantIDs[participant.ID] = struct{}{}
+		}
+	}
+	if len(participantIDs) == 0 {
+		return map[uuid.UUID]string{}, nil
+	}
+
+	identityIDs := make([]string, 0, len(participantIDs))
+	for id := range participantIDs {
+		identityIDs = append(identityIDs, id.String())
+	}
+	sort.Strings(identityIDs)
+
+	identityCtx, err := identityClientContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.identity.BatchGetNicknames(identityCtx, &identityv1.BatchGetNicknamesRequest{
+		OrganizationId: organizationID.String(),
+		IdentityIds:    identityIDs,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "batch get nicknames: %v", err)
+	}
+
+	nicknames := make(map[uuid.UUID]string, len(response.GetEntries()))
+	for i, entry := range response.GetEntries() {
+		if entry == nil {
+			return nil, status.Errorf(codes.Internal, "nickname entry[%d]: missing", i)
+		}
+		identityID, err := parseUUID(entry.GetIdentityId())
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "nickname entry[%d].identity_id: %v", i, err)
+		}
+		nicknames[identityID] = entry.GetNickname()
+	}
+	return nicknames, nil
 }
 
 type initiatorInfo struct {
@@ -899,6 +1167,27 @@ func metadataValue(md metadata.MD, key string) string {
 		return trimmed
 	}
 	return ""
+}
+
+func identityClientContext(ctx context.Context) (context.Context, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "identity not available")
+	}
+	identityID := metadataValue(md, identityIDMetadataKey)
+	if identityID == "" {
+		return nil, status.Error(codes.Unauthenticated, "identity not available")
+	}
+	outgoing := metadata.MD{identityIDMetadataKey: []string{identityID}}
+	identityType := metadataValue(md, identityTypeMetadataKey)
+	if identityType != "" {
+		outgoing[identityTypeMetadataKey] = []string{identityType}
+	}
+	organizationID := metadataValue(md, organizationIDMetadataKey)
+	if organizationID != "" {
+		outgoing[organizationIDMetadataKey] = []string{organizationID}
+	}
+	return metadata.NewOutgoingContext(ctx, outgoing), nil
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

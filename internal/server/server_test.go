@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/agynio/threads/internal/store"
 )
@@ -26,7 +29,7 @@ type stubThreadStore struct {
 	addParticipantFn func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
 	sendMessageFn    func(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
 	getThreadFn      func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	listOrgThreadsFn func(ctx context.Context, organizationID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
+	listOrgThreadsFn func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
 	listMessagesFn   func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
 	listUnackedFn    func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
 	ackMessagesFn    func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
@@ -90,12 +93,12 @@ func (s *stubThreadStore) ListThreads(context.Context, uuid.UUID, int32, *store.
 	return store.ThreadListResult{}, nil
 }
 
-func (s *stubThreadStore) ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+func (s *stubThreadStore) ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
 	s.t.Helper()
 	if s.listOrgThreadsFn == nil {
 		s.t.Fatalf("unexpected ListOrganizationThreads call")
 	}
-	return s.listOrgThreadsFn(ctx, organizationID, status, pageSize, cursor)
+	return s.listOrgThreadsFn(ctx, organizationID, filter, sort, pageSize, cursor)
 }
 
 func (s *stubThreadStore) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error) {
@@ -125,6 +128,7 @@ func (s *stubThreadStore) AckMessages(ctx context.Context, participantID uuid.UU
 type stubIdentityResolver struct {
 	t         *testing.T
 	resolveFn func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
+	batchFn   func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
 }
 
 func (s *stubIdentityResolver) ResolveNickname(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
@@ -133,6 +137,14 @@ func (s *stubIdentityResolver) ResolveNickname(ctx context.Context, req *identit
 		s.t.Fatalf("unexpected ResolveNickname call")
 	}
 	return s.resolveFn(ctx, req, opts...)
+}
+
+func (s *stubIdentityResolver) BatchGetNicknames(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error) {
+	s.t.Helper()
+	if s.batchFn == nil {
+		s.t.Fatalf("unexpected BatchGetNicknames call")
+	}
+	return s.batchFn(ctx, req, opts...)
 }
 
 type stubAgentsService struct {
@@ -442,6 +454,7 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 	threadID := uuid.New()
 	organizationID := uuid.New()
 	participantID := uuid.New()
+	identityID := uuid.New()
 	now := time.Now().UTC()
 	storeCalled := false
 	identityCalled := false
@@ -476,6 +489,19 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 		t: t,
 		resolveFn: func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
 			identityCalled = true
+			md, ok := metadata.FromOutgoingContext(ctx)
+			if !ok {
+				t.Fatal("expected outgoing metadata")
+			}
+			if value := md.Get(identityIDMetadataKey); len(value) != 1 || value[0] != identityID.String() {
+				t.Fatalf("expected %s %s, got %v", identityIDMetadataKey, identityID, value)
+			}
+			if value := md.Get(identityTypeMetadataKey); len(value) != 0 {
+				t.Fatalf("expected no %s metadata, got %v", identityTypeMetadataKey, value)
+			}
+			if value := md.Get(organizationIDMetadataKey); len(value) != 1 || value[0] != organizationID.String() {
+				t.Fatalf("expected %s %s, got %v", organizationIDMetadataKey, organizationID, value)
+			}
 			if req.GetOrganizationId() != organizationID.String() {
 				t.Fatalf("expected organization ID %s, got %s", organizationID, req.GetOrganizationId())
 			}
@@ -486,11 +512,13 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 		},
 	}
 
-	identityID := uuid.New()
 	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", identityID.String(), "x-organization-id", organizationID.String()),
+	)
 	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{
 		OrganizationId: &orgIDValue,
 		Participants: []*threadsv1.ParticipantIdentifier{
@@ -1812,12 +1840,14 @@ func TestGetOrganizationThreadsPagination(t *testing.T) {
 	createdAt := time.Now().UTC().Add(-2 * time.Hour)
 	updatedAt := createdAt.Add(10 * time.Minute)
 	pageCursor := store.OrganizationThreadCursor{CreatedAt: createdAt.Add(30 * time.Minute), ThreadID: uuid.New()}
-	pageToken, err := store.EncodeOrganizationThreadPageToken(organizationID, pageCursor)
+	filter := store.OrganizationThreadFilter{}
+	sortSpec := store.OrganizationThreadSort{Field: store.OrganizationThreadSortFieldCreated, Direction: store.SortDirectionDesc}
+	pageToken, err := store.EncodeOrganizationThreadPageToken(organizationID, filter, sortSpec, pageCursor)
 	if err != nil {
 		t.Fatalf("encode page token: %v", err)
 	}
 	nextCursor := store.OrganizationThreadCursor{CreatedAt: createdAt, ThreadID: threadID}
-	expectedNextToken, err := store.EncodeOrganizationThreadPageToken(organizationID, nextCursor)
+	expectedNextToken, err := store.EncodeOrganizationThreadPageToken(organizationID, filter, sortSpec, nextCursor)
 	if err != nil {
 		t.Fatalf("encode next token: %v", err)
 	}
@@ -1826,13 +1856,16 @@ func TestGetOrganizationThreadsPagination(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, listFilter store.OrganizationThreadFilter, listSort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
 			}
-			if status != nil {
-				t.Fatalf("expected nil status filter")
+			if !organizationThreadFiltersEqual(listFilter, filter) {
+				t.Fatalf("unexpected filter: %+v", listFilter)
+			}
+			if listSort != sortSpec {
+				t.Fatalf("unexpected sort: %+v", listSort)
 			}
 			if pageSize != 1 {
 				t.Fatalf("expected page size 1, got %d", pageSize)
@@ -1903,13 +1936,17 @@ func TestGetOrganizationThreadsDegradedStatusFilter(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, status *store.ThreadStatus, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, filter store.OrganizationThreadFilter, sortSpec store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
 			}
-			if status == nil || *status != store.ThreadStatusDegraded {
-				t.Fatalf("expected degraded status filter, got %v", status)
+			if len(filter.StatusIn) != 1 || filter.StatusIn[0] != store.ThreadStatusDegraded {
+				t.Fatalf("expected degraded status filter, got %+v", filter.StatusIn)
+			}
+			expectedSort := store.OrganizationThreadSort{Field: store.OrganizationThreadSortFieldCreated, Direction: store.SortDirectionDesc}
+			if sortSpec != expectedSort {
+				t.Fatalf("unexpected sort: %+v", sortSpec)
 			}
 			return store.OrganizationThreadListResult{}, nil
 		},
@@ -1924,6 +1961,244 @@ func TestGetOrganizationThreadsDegradedStatusFilter(t *testing.T) {
 	}
 	if !storeCalled {
 		t.Fatal("expected GetOrganizationThreads to be called")
+	}
+}
+
+func TestListOrganizationThreadsAuthorizationDenied(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	authCalled := false
+
+	authStub := &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			authCalled = true
+			return &authorizationv1.CheckResponse{Allowed: false}, nil
+		},
+	}
+
+	srv := New(&stubThreadStore{t: t}, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{OrganizationId: organizationID.String()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %s: %s", st.Code(), st.Message())
+	}
+	if !authCalled {
+		t.Fatal("expected authorization check")
+	}
+}
+
+func TestListOrganizationThreadsFilterSortPagination(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	identityType := "user"
+	participantA := uuid.New()
+	participantB := uuid.New()
+	createdAfter := time.Now().UTC().Add(-24 * time.Hour)
+	createdBefore := time.Now().UTC().Add(-2 * time.Hour)
+	updatedAt := time.Now().UTC().Add(-1 * time.Hour)
+	threadID := uuid.New()
+	pageCursor := store.OrganizationThreadCursor{UpdatedAt: updatedAt.Add(-5 * time.Minute), ThreadID: uuid.New()}
+
+	filter := &threadsv1.ListOrganizationThreadsFilter{
+		StatusIn:        []threadsv1.ThreadStatus{threadsv1.ThreadStatus_THREAD_STATUS_DEGRADED, threadsv1.ThreadStatus_THREAD_STATUS_ACTIVE},
+		ParticipantIdIn: []string{participantB.String(), " " + participantA.String() + " "},
+		CreatedAfter:    timestamppb.New(createdAfter),
+		CreatedBefore:   timestamppb.New(createdBefore),
+	}
+	sortSpec := &threadsv1.ListOrganizationThreadsSort{
+		Field:     threadsv1.ListOrganizationThreadsSortField_LIST_ORGANIZATION_THREADS_SORT_FIELD_UPDATED,
+		Direction: threadsv1.SortDirection_SORT_DIRECTION_ASC,
+	}
+	expectedStatuses := []store.ThreadStatus{store.ThreadStatusActive, store.ThreadStatusDegraded}
+	sort.Slice(expectedStatuses, func(i, j int) bool { return expectedStatuses[i] < expectedStatuses[j] })
+	expectedParticipants := []uuid.UUID{participantA, participantB}
+	sort.Slice(expectedParticipants, func(i, j int) bool { return expectedParticipants[i].String() < expectedParticipants[j].String() })
+	expectedFilter := store.OrganizationThreadFilter{
+		StatusIn:       expectedStatuses,
+		ParticipantIDs: expectedParticipants,
+		CreatedAfter:   &createdAfter,
+		CreatedBefore:  &createdBefore,
+	}
+	expectedSort := store.OrganizationThreadSort{Field: store.OrganizationThreadSortFieldUpdated, Direction: store.SortDirectionAsc}
+	pageToken, err := store.EncodeOrganizationThreadPageToken(organizationID, expectedFilter, expectedSort, pageCursor)
+	if err != nil {
+		t.Fatalf("encode page token: %v", err)
+	}
+	nextCursor := store.OrganizationThreadCursor{UpdatedAt: updatedAt, ThreadID: threadID}
+	expectedNextToken, err := store.EncodeOrganizationThreadPageToken(organizationID, expectedFilter, expectedSort, nextCursor)
+	if err != nil {
+		t.Fatalf("encode next page token: %v", err)
+	}
+
+	storeCalled := false
+	identityCalled := false
+
+	storeStub := &stubThreadStore{
+		t: t,
+		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, listFilter store.OrganizationThreadFilter, listSort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
+			if !organizationThreadFiltersEqual(listFilter, expectedFilter) {
+				t.Fatalf("unexpected filter: %+v", listFilter)
+			}
+			if listSort != expectedSort {
+				t.Fatalf("unexpected sort: %+v", listSort)
+			}
+			if pageSize != 2 {
+				t.Fatalf("expected page size 2, got %d", pageSize)
+			}
+			if cursor == nil {
+				t.Fatal("expected cursor")
+			}
+			if cursor.ThreadID != pageCursor.ThreadID || !cursor.UpdatedAt.Equal(pageCursor.UpdatedAt) {
+				t.Fatalf("unexpected cursor: %+v", cursor)
+			}
+			return store.OrganizationThreadListResult{
+				Threads: []store.Thread{
+					{
+						ID:             threadID,
+						OrganizationID: &organizationID,
+						MessageCount:   1,
+						Status:         store.ThreadStatusActive,
+						CreatedAt:      createdAfter.Add(2 * time.Hour),
+						UpdatedAt:      updatedAt,
+						Participants: []store.Participant{
+							{ID: participantA, JoinedAt: createdAfter, Passive: false},
+							{ID: participantB, JoinedAt: createdAfter, Passive: true},
+						},
+					},
+				},
+				NextCursor: &nextCursor,
+			}, nil
+		},
+	}
+	identityStub := &stubIdentityResolver{
+		t: t,
+		batchFn: func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error) {
+			identityCalled = true
+			md, ok := metadata.FromOutgoingContext(ctx)
+			if !ok {
+				t.Fatal("expected outgoing metadata")
+			}
+			if value := md.Get(identityIDMetadataKey); len(value) != 1 || value[0] != identityID.String() {
+				t.Fatalf("expected %s %s, got %v", identityIDMetadataKey, identityID, value)
+			}
+			if value := md.Get(identityTypeMetadataKey); len(value) != 1 || value[0] != identityType {
+				t.Fatalf("expected %s %s, got %v", identityTypeMetadataKey, identityType, value)
+			}
+			if value := md.Get(organizationIDMetadataKey); len(value) != 1 || value[0] != organizationID.String() {
+				t.Fatalf("expected %s %s, got %v", organizationIDMetadataKey, organizationID, value)
+			}
+			if req.GetOrganizationId() != organizationID.String() {
+				t.Fatalf("expected organization id %s, got %s", organizationID, req.GetOrganizationId())
+			}
+			expectedIDs := []string{participantA.String(), participantB.String()}
+			sort.Strings(expectedIDs)
+			if !reflect.DeepEqual(req.GetIdentityIds(), expectedIDs) {
+				t.Fatalf("expected identity ids %v, got %v", expectedIDs, req.GetIdentityIds())
+			}
+			return &identityv1.BatchGetNicknamesResponse{}, nil
+		},
+	}
+	authStub := allowAuthStub(t)
+
+	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", identityType, "x-organization-id", organizationID.String()),
+	)
+	resp, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{
+		OrganizationId: organizationID.String(),
+		Filter:         filter,
+		Sort:           sortSpec,
+		PageSize:       2,
+		PageToken:      pageToken,
+	})
+	if err != nil {
+		t.Fatalf("ListOrganizationThreads returned error: %v", err)
+	}
+	if !storeCalled {
+		t.Fatal("expected ListOrganizationThreads to be called")
+	}
+	if !identityCalled {
+		t.Fatal("expected BatchGetNicknames to be called")
+	}
+	if resp.GetNextPageToken() != expectedNextToken {
+		t.Fatalf("expected next page token %s, got %s", expectedNextToken, resp.GetNextPageToken())
+	}
+}
+
+func TestListOrganizationThreadsNicknameEnrichment(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	threadID := uuid.New()
+	participantA := uuid.New()
+	participantB := uuid.New()
+	createdAt := time.Now().UTC().Add(-2 * time.Hour)
+
+	storeStub := &stubThreadStore{
+		t: t,
+		listOrgThreadsFn: func(ctx context.Context, orgID uuid.UUID, filter store.OrganizationThreadFilter, sortSpec store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error) {
+			return store.OrganizationThreadListResult{
+				Threads: []store.Thread{
+					{
+						ID:             threadID,
+						OrganizationID: &organizationID,
+						MessageCount:   2,
+						Status:         store.ThreadStatusActive,
+						CreatedAt:      createdAt,
+						UpdatedAt:      createdAt,
+						Participants: []store.Participant{
+							{ID: participantA, JoinedAt: createdAt, Passive: false},
+							{ID: participantB, JoinedAt: createdAt, Passive: false},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	identityStub := &stubIdentityResolver{
+		t: t,
+		batchFn: func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error) {
+			return &identityv1.BatchGetNicknamesResponse{
+				Entries: []*identityv1.NicknameEntry{
+					{IdentityId: participantA.String(), Nickname: "alpha"},
+				},
+			}, nil
+		},
+	}
+	authStub := allowAuthStub(t)
+
+	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	resp, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{OrganizationId: organizationID.String()})
+	if err != nil {
+		t.Fatalf("ListOrganizationThreads returned error: %v", err)
+	}
+	if len(resp.GetThreads()) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(resp.GetThreads()))
+	}
+	thread := resp.GetThreads()[0]
+	participantOne := findProtoParticipant(thread, participantA)
+	if participantOne == nil || participantOne.GetNickname() != "alpha" {
+		t.Fatalf("expected nickname alpha for participantA, got %+v", participantOne)
+	}
+	participantTwo := findProtoParticipant(thread, participantB)
+	if participantTwo == nil {
+		t.Fatal("expected participantB")
+	}
+	if participantTwo.GetNickname() != "" {
+		t.Fatalf("expected empty nickname for participantB, got %s", participantTwo.GetNickname())
 	}
 }
 
@@ -2190,4 +2465,36 @@ func findProtoParticipant(thread *threadsv1.Thread, id uuid.UUID) *threadsv1.Par
 		}
 	}
 	return nil
+}
+
+func organizationThreadFiltersEqual(left, right store.OrganizationThreadFilter) bool {
+	if len(left.StatusIn) != len(right.StatusIn) {
+		return false
+	}
+	for i := range left.StatusIn {
+		if left.StatusIn[i] != right.StatusIn[i] {
+			return false
+		}
+	}
+	if len(left.ParticipantIDs) != len(right.ParticipantIDs) {
+		return false
+	}
+	for i := range left.ParticipantIDs {
+		if left.ParticipantIDs[i] != right.ParticipantIDs[i] {
+			return false
+		}
+	}
+	if (left.CreatedAfter == nil) != (right.CreatedAfter == nil) {
+		return false
+	}
+	if left.CreatedAfter != nil && !left.CreatedAfter.Equal(*right.CreatedAfter) {
+		return false
+	}
+	if (left.CreatedBefore == nil) != (right.CreatedBefore == nil) {
+		return false
+	}
+	if left.CreatedBefore != nil && !left.CreatedBefore.Equal(*right.CreatedBefore) {
+		return false
+	}
+	return true
 }
