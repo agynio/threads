@@ -454,6 +454,7 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 	threadID := uuid.New()
 	organizationID := uuid.New()
 	participantID := uuid.New()
+	identityID := uuid.New()
 	now := time.Now().UTC()
 	storeCalled := false
 	identityCalled := false
@@ -488,6 +489,19 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 		t: t,
 		resolveFn: func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
 			identityCalled = true
+			md, ok := metadata.FromOutgoingContext(ctx)
+			if !ok {
+				t.Fatal("expected outgoing metadata")
+			}
+			if value := md.Get(identityIDMetadataKey); len(value) != 1 || value[0] != identityID.String() {
+				t.Fatalf("expected %s %s, got %v", identityIDMetadataKey, identityID, value)
+			}
+			if value := md.Get(identityTypeMetadataKey); len(value) != 0 {
+				t.Fatalf("expected no %s metadata, got %v", identityTypeMetadataKey, value)
+			}
+			if value := md.Get(organizationIDMetadataKey); len(value) != 1 || value[0] != organizationID.String() {
+				t.Fatalf("expected %s %s, got %v", organizationIDMetadataKey, organizationID, value)
+			}
 			if req.GetOrganizationId() != organizationID.String() {
 				t.Fatalf("expected organization ID %s, got %s", organizationID, req.GetOrganizationId())
 			}
@@ -498,11 +512,13 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 		},
 	}
 
-	identityID := uuid.New()
 	authStub := allowAuthStub(t)
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
 	orgIDValue := organizationID.String()
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", identityID.String(), "x-organization-id", organizationID.String()),
+	)
 	resp, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{
 		OrganizationId: &orgIDValue,
 		Participants: []*threadsv1.ParticipantIdentifier{
@@ -1982,6 +1998,7 @@ func TestListOrganizationThreadsAuthorizationDenied(t *testing.T) {
 func TestListOrganizationThreadsFilterSortPagination(t *testing.T) {
 	organizationID := uuid.New()
 	identityID := uuid.New()
+	identityType := "user"
 	participantA := uuid.New()
 	participantB := uuid.New()
 	createdAfter := time.Now().UTC().Add(-24 * time.Hour)
@@ -2069,6 +2086,19 @@ func TestListOrganizationThreadsFilterSortPagination(t *testing.T) {
 		t: t,
 		batchFn: func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error) {
 			identityCalled = true
+			md, ok := metadata.FromOutgoingContext(ctx)
+			if !ok {
+				t.Fatal("expected outgoing metadata")
+			}
+			if value := md.Get(identityIDMetadataKey); len(value) != 1 || value[0] != identityID.String() {
+				t.Fatalf("expected %s %s, got %v", identityIDMetadataKey, identityID, value)
+			}
+			if value := md.Get(identityTypeMetadataKey); len(value) != 1 || value[0] != identityType {
+				t.Fatalf("expected %s %s, got %v", identityTypeMetadataKey, identityType, value)
+			}
+			if value := md.Get(organizationIDMetadataKey); len(value) != 1 || value[0] != organizationID.String() {
+				t.Fatalf("expected %s %s, got %v", organizationIDMetadataKey, organizationID, value)
+			}
 			if req.GetOrganizationId() != organizationID.String() {
 				t.Fatalf("expected organization id %s, got %s", organizationID, req.GetOrganizationId())
 			}
@@ -2083,7 +2113,10 @@ func TestListOrganizationThreadsFilterSortPagination(t *testing.T) {
 	authStub := allowAuthStub(t)
 
 	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", identityType, "x-organization-id", organizationID.String()),
+	)
 	resp, err := srv.ListOrganizationThreads(ctx, &threadsv1.ListOrganizationThreadsRequest{
 		OrganizationId: organizationID.String(),
 		Filter:         filter,

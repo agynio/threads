@@ -732,7 +732,11 @@ func (s *Server) resolveNickname(ctx context.Context, organizationID uuid.UUID, 
 	if cleaned == "" {
 		return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "%s must be provided", fieldName)
 	}
-	response, err := s.identity.ResolveNickname(ctx, &identityv1.ResolveNicknameRequest{
+	identityCtx, err := identityClientContext(ctx)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	response, err := s.identity.ResolveNickname(identityCtx, &identityv1.ResolveNicknameRequest{
 		OrganizationId: organizationID.String(),
 		Nickname:       cleaned,
 	})
@@ -1104,7 +1108,11 @@ func (s *Server) batchResolveNicknames(ctx context.Context, organizationID uuid.
 	}
 	sort.Strings(identityIDs)
 
-	response, err := s.identity.BatchGetNicknames(ctx, &identityv1.BatchGetNicknamesRequest{
+	identityCtx, err := identityClientContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.identity.BatchGetNicknames(identityCtx, &identityv1.BatchGetNicknamesRequest{
 		OrganizationId: organizationID.String(),
 		IdentityIds:    identityIDs,
 	})
@@ -1159,6 +1167,27 @@ func metadataValue(md metadata.MD, key string) string {
 		return trimmed
 	}
 	return ""
+}
+
+func identityClientContext(ctx context.Context) (context.Context, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "identity not available")
+	}
+	identityID := metadataValue(md, identityIDMetadataKey)
+	if identityID == "" {
+		return nil, status.Error(codes.Unauthenticated, "identity not available")
+	}
+	outgoing := metadata.MD{identityIDMetadataKey: []string{identityID}}
+	identityType := metadataValue(md, identityTypeMetadataKey)
+	if identityType != "" {
+		outgoing[identityTypeMetadataKey] = []string{identityType}
+	}
+	organizationID := metadataValue(md, organizationIDMetadataKey)
+	if organizationID != "" {
+		outgoing[organizationIDMetadataKey] = []string{organizationID}
+	}
+	return metadata.NewOutgoingContext(ctx, outgoing), nil
 }
 
 func parseUUID(value string) (uuid.UUID, error) {
