@@ -234,7 +234,7 @@ func (s *Server) agentParticipantIDs(ctx context.Context, participants []store.P
 		return nil, nil
 	}
 	if s.identity == nil {
-		return nil, nil
+		return nil, status.Error(codes.Internal, "identity service not configured")
 	}
 	identityIDs := make([]string, len(participants))
 	participantIDs := make(map[uuid.UUID]struct{}, len(participants))
