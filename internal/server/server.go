@@ -61,6 +61,7 @@ type threadStore interface {
 type identityResolver interface {
 	ResolveNickname(ctx context.Context, in *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
 	BatchGetNicknames(ctx context.Context, in *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
+	BatchGetIdentityTypes(ctx context.Context, in *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error)
 }
 
 type agentsService interface {
@@ -171,6 +172,9 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 		participants = append(participants, store.ParticipantInput{ID: initiator.ID, Passive: initiator.Passive})
 	}
 	participants = append(participants, resolved...)
+	if err := s.requireCanInitiateAgentParticipants(ctx, identityID, participants); err != nil {
+		return nil, err
+	}
 
 	thread, err := s.store.CreateThread(ctx, organizationID, participants)
 	if err != nil {
@@ -210,6 +214,60 @@ func addResolvedParticipant(id uuid.UUID, initiator initiatorInfo, hasInitiator 
 	seen[id] = struct{}{}
 	*resolved = append(*resolved, store.ParticipantInput{ID: id, Passive: false})
 	return nil
+}
+
+func (s *Server) requireCanInitiateAgentParticipants(ctx context.Context, callerID uuid.UUID, participants []store.ParticipantInput) error {
+	agentIDs, err := s.agentParticipantIDs(ctx, participants)
+	if err != nil {
+		return err
+	}
+	for _, agentID := range agentIDs {
+		if err := s.requireAllowed(ctx, callerID, "can_initiate", fmt.Sprintf("agent:%s", agentID.String())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) agentParticipantIDs(ctx context.Context, participants []store.ParticipantInput) ([]uuid.UUID, error) {
+	if len(participants) == 0 {
+		return nil, nil
+	}
+	if s.identity == nil {
+		return nil, status.Error(codes.Internal, "identity service not configured")
+	}
+	identityIDs := make([]string, len(participants))
+	participantIDs := make(map[uuid.UUID]struct{}, len(participants))
+	for i, participant := range participants {
+		identityIDs[i] = participant.ID.String()
+		participantIDs[participant.ID] = struct{}{}
+	}
+	identityCtx, err := identityClientContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.identity.BatchGetIdentityTypes(identityCtx, &identityv1.BatchGetIdentityTypesRequest{IdentityIds: identityIDs})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "batch get identity types: %v", err)
+	}
+	agentIDs := make([]uuid.UUID, 0)
+	for i, entry := range response.GetEntries() {
+		if entry == nil {
+			return nil, status.Errorf(codes.Internal, "identity type entry[%d]: missing", i)
+		}
+		if entry.GetIdentityType() != identityv1.IdentityType_IDENTITY_TYPE_AGENT {
+			continue
+		}
+		identityID, err := parseUUID(entry.GetIdentityId())
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: %v", i, err)
+		}
+		if _, ok := participantIDs[identityID]; !ok {
+			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: unexpected identity", i)
+		}
+		agentIDs = append(agentIDs, identityID)
+	}
+	return agentIDs, nil
 }
 
 func (s *Server) ArchiveThread(ctx context.Context, req *threadsv1.ArchiveThreadRequest) (*threadsv1.ArchiveThreadResponse, error) {
@@ -281,6 +339,9 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 	}
 	participantID, err := s.resolveParticipantID(ctx, req)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.requireCanInitiateAgentParticipants(ctx, identityID, []store.ParticipantInput{{ID: participantID}}); err != nil {
 		return nil, err
 	}
 	thread, err := s.store.AddParticipant(ctx, threadID, participantID, req.GetPassive())

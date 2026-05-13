@@ -135,9 +135,10 @@ func (s *stubThreadStore) AckMessages(ctx context.Context, participantID uuid.UU
 }
 
 type stubIdentityResolver struct {
-	t         *testing.T
-	resolveFn func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
-	batchFn   func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
+	t           *testing.T
+	resolveFn   func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
+	batchFn     func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
+	typeBatchFn func(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error)
 }
 
 func (s *stubIdentityResolver) ResolveNickname(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
@@ -154,6 +155,18 @@ func (s *stubIdentityResolver) BatchGetNicknames(ctx context.Context, req *ident
 		s.t.Fatalf("unexpected BatchGetNicknames call")
 	}
 	return s.batchFn(ctx, req, opts...)
+}
+
+func (s *stubIdentityResolver) BatchGetIdentityTypes(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error) {
+	s.t.Helper()
+	if s.typeBatchFn == nil {
+		entries := make([]*identityv1.IdentityTypeEntry, len(req.GetIdentityIds()))
+		for i, identityID := range req.GetIdentityIds() {
+			entries[i] = &identityv1.IdentityTypeEntry{IdentityId: identityID, IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER}
+		}
+		return &identityv1.BatchGetIdentityTypesResponse{Entries: entries}, nil
+	}
+	return s.typeBatchFn(ctx, req, opts...)
 }
 
 type stubAgentsService struct {
@@ -198,6 +211,30 @@ func allowAuthStub(t *testing.T) *stubAuthorizationService {
 		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
 			return &authorizationv1.CheckResponse{Allowed: true}, nil
 		},
+	}
+}
+
+func TestCreateThreadParticipantIDsRequireIdentityResolver(t *testing.T) {
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	participantID := uuid.New()
+	storeStub := &stubThreadStore{t: t}
+	authStub := allowAuthStub(t)
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", "user", "x-organization-id", organizationID.String()),
+	)
+	_, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{participantID.String()}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.Internal {
+		t.Fatalf("expected Internal, got %s: %s", st.Code(), st.Message())
 	}
 }
 
@@ -247,7 +284,7 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 	}
 
 	authStub := allowAuthStub(t)
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent", "x-organization-id", organizationID.String()),
@@ -310,7 +347,7 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 	}
 
 	authStub := allowAuthStub(t)
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", agentID.String(), "x-identity-type", "agent", "x-organization-id", organizationID.String()),
@@ -377,7 +414,7 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 	}
 
 	authStub := allowAuthStub(t)
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", userID.String(), "x-identity-type", "user", "x-organization-id", organizationID.String()),
@@ -932,7 +969,7 @@ func TestCreateThreadWritesAuthorizationTuples(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
 		metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", "user", "x-organization-id", organizationID.String()),
@@ -1058,7 +1095,7 @@ func TestAddParticipantWithParticipantIDOneof(t *testing.T) {
 
 	identityID := uuid.New()
 	authStub := allowAuthStub(t)
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId: threadID.String(),
@@ -1101,7 +1138,7 @@ func TestAddParticipantWithLegacyParticipantID(t *testing.T) {
 
 	identityID := uuid.New()
 	authStub := allowAuthStub(t)
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
 		ThreadId:      threadID.String(),
@@ -1227,7 +1264,7 @@ func TestAddParticipantWritesAuthorizationTuple(t *testing.T) {
 		},
 	}
 
-	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	srv := New(storeStub, nil, authStub, &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
 	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{ThreadId: threadID.String(), ParticipantId: participantID.String()})
 	if err != nil {
