@@ -135,9 +135,10 @@ func (s *stubThreadStore) AckMessages(ctx context.Context, participantID uuid.UU
 }
 
 type stubIdentityResolver struct {
-	t         *testing.T
-	resolveFn func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
-	batchFn   func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
+	t           *testing.T
+	resolveFn   func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error)
+	batchFn     func(ctx context.Context, req *identityv1.BatchGetNicknamesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error)
+	typeBatchFn func(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error)
 }
 
 func (s *stubIdentityResolver) ResolveNickname(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
@@ -154,6 +155,18 @@ func (s *stubIdentityResolver) BatchGetNicknames(ctx context.Context, req *ident
 		s.t.Fatalf("unexpected BatchGetNicknames call")
 	}
 	return s.batchFn(ctx, req, opts...)
+}
+
+func (s *stubIdentityResolver) BatchGetIdentityTypes(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error) {
+	s.t.Helper()
+	if s.typeBatchFn == nil {
+		entries := make([]*identityv1.IdentityTypeEntry, len(req.GetIdentityIds()))
+		for i, identityID := range req.GetIdentityIds() {
+			entries[i] = &identityv1.IdentityTypeEntry{IdentityId: identityID, IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER}
+		}
+		return &identityv1.BatchGetIdentityTypesResponse{Entries: entries}, nil
+	}
+	return s.typeBatchFn(ctx, req, opts...)
 }
 
 type stubAgentsService struct {
