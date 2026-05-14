@@ -1873,6 +1873,35 @@ func TestSendMessageRecordsUsageWithThreadOrganization(t *testing.T) {
 	}
 }
 
+func TestSendMessageRejectsThreadWithoutOrganization(t *testing.T) {
+	threadID := uuid.New()
+	identityID := uuid.New()
+
+	storeStub := &stubThreadStore{
+		t: t,
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+			return store.SendMessageResult{}, store.ErrThreadOrganizationMissing
+		},
+	}
+
+	srv := New(storeStub, nil, allowAuthStub(t), nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.SendMessage(ctx, &threadsv1.SendMessageRequest{ThreadId: threadID.String(), Body: "hi"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %s: %s", st.Code(), st.Message())
+	}
+	if st.Message() != store.ErrThreadOrganizationMissing.Error() {
+		t.Fatalf("expected message %q, got %q", store.ErrThreadOrganizationMissing.Error(), st.Message())
+	}
+}
+
 func TestSendMessageRejectsSenderMismatch(t *testing.T) {
 	threadID := uuid.New()
 	identityID := uuid.New()

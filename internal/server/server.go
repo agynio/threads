@@ -1296,6 +1296,8 @@ func toStatusError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, store.ErrThreadDegraded):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, store.ErrThreadOrganizationMissing):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, store.ErrParticipantNotInThread):
 		return status.Error(codes.InvalidArgument, err.Error())
 	default:

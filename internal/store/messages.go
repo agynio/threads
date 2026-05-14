@@ -30,6 +30,10 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if thread.Status == ThreadStatusDegraded {
 			return ErrThreadDegraded
 		}
+		if thread.OrganizationID == nil {
+			return ErrThreadOrganizationMissing
+		}
+		organizationID := *thread.OrganizationID
 		now := time.Now().UTC()
 		messageID := uuid.New()
 		fileIDArray := pgtype.FlatArray[string](uuidsToStrings(fileIDs))
@@ -63,7 +67,7 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				FileIDs:   fileIDs,
 				CreatedAt: now,
 			},
-			OrganizationID: *thread.OrganizationID,
+			OrganizationID: organizationID,
 			Recipients:     recipients,
 		}
 		return nil
