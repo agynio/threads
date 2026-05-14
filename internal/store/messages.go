@@ -12,8 +12,9 @@ import (
 )
 
 type SendMessageResult struct {
-	Message    Message
-	Recipients []uuid.UUID
+	Message        Message
+	OrganizationID uuid.UUID
+	Recipients     []uuid.UUID
 }
 
 func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (SendMessageResult, error) {
@@ -62,7 +63,8 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				FileIDs:   fileIDs,
 				CreatedAt: now,
 			},
-			Recipients: recipients,
+			OrganizationID: *thread.OrganizationID,
+			Recipients:     recipients,
 		}
 		return nil
 	})

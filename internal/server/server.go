@@ -398,7 +398,7 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 	if err != nil {
 		return nil, toStatusError(err)
 	}
-	s.recordMessageSent(ctx, result.Message)
+	s.recordMessageSent(ctx, result)
 	if err := s.notifier.PublishMessageCreated(ctx, threadID, result.Message.ID, result.Recipients); err != nil {
 		return nil, status.Errorf(codes.Internal, "notify recipients: %v", err)
 	}
@@ -741,38 +741,36 @@ func (s *Server) AckMessages(ctx context.Context, req *threadsv1.AckMessagesRequ
 }
 
 func (s *Server) recordThreadCreated(ctx context.Context, thread store.Thread) {
+	if thread.OrganizationID == nil {
+		panic("thread organization_id missing")
+	}
 	threadID := thread.ID
+	orgID := *thread.OrganizationID
 	createdAt := thread.CreatedAt
-	s.recordUsageAsync(ctx, "thread_created", func(recordCtx context.Context, orgID uuid.UUID) error {
+	s.recordUsageAsync(ctx, "thread_created", func(recordCtx context.Context) error {
 		return s.metering.RecordThreadCreated(recordCtx, orgID, threadID, createdAt)
 	})
 }
 
-func (s *Server) recordMessageSent(ctx context.Context, message store.Message) {
+func (s *Server) recordMessageSent(ctx context.Context, result store.SendMessageResult) {
+	orgID := result.OrganizationID
+	message := result.Message
 	messageID := message.ID
 	threadID := message.ThreadID
 	createdAt := message.CreatedAt
-	s.recordUsageAsync(ctx, "message_sent", func(recordCtx context.Context, orgID uuid.UUID) error {
+	s.recordUsageAsync(ctx, "message_sent", func(recordCtx context.Context) error {
 		return s.metering.RecordMessageSent(recordCtx, orgID, threadID, messageID, createdAt)
 	})
 }
 
-func (s *Server) recordUsageAsync(ctx context.Context, label string, record func(context.Context, uuid.UUID) error) {
+func (s *Server) recordUsageAsync(ctx context.Context, label string, record func(context.Context) error) {
 	if s.metering == nil {
 		return
 	}
-	orgID, ok, err := organizationIDFromContext(ctx)
-	if err != nil {
-		log.Printf("metering: %s: %v", label, err)
-		return
-	}
-	if !ok {
-		return
-	}
 	go func() {
-		recordCtx, cancel := context.WithTimeout(context.Background(), meteringTimeout)
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), meteringTimeout)
 		defer cancel()
-		if err := record(recordCtx, orgID); err != nil {
+		if err := record(recordCtx); err != nil {
 			log.Printf("metering: %s: %v", label, err)
 		}
 	}()

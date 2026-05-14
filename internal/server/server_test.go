@@ -188,6 +188,41 @@ type stubAuthorizationService struct {
 	writeFn func(ctx context.Context, req *authorizationv1.WriteRequest, opts ...grpc.CallOption) (*authorizationv1.WriteResponse, error)
 }
 
+type stubNotifier struct {
+	t         *testing.T
+	publishFn func(ctx context.Context, threadID, messageID uuid.UUID, recipients []uuid.UUID) error
+}
+
+func (s *stubNotifier) PublishMessageCreated(ctx context.Context, threadID, messageID uuid.UUID, recipients []uuid.UUID) error {
+	s.t.Helper()
+	if s.publishFn == nil {
+		return nil
+	}
+	return s.publishFn(ctx, threadID, messageID, recipients)
+}
+
+type stubMeteringRecorder struct {
+	t                     *testing.T
+	recordThreadCreatedFn func(ctx context.Context, orgID, threadID uuid.UUID, createdAt time.Time) error
+	recordMessageSentFn   func(ctx context.Context, orgID, threadID, messageID uuid.UUID, createdAt time.Time) error
+}
+
+func (s *stubMeteringRecorder) RecordThreadCreated(ctx context.Context, orgID, threadID uuid.UUID, createdAt time.Time) error {
+	s.t.Helper()
+	if s.recordThreadCreatedFn == nil {
+		s.t.Fatalf("unexpected RecordThreadCreated call")
+	}
+	return s.recordThreadCreatedFn(ctx, orgID, threadID, createdAt)
+}
+
+func (s *stubMeteringRecorder) RecordMessageSent(ctx context.Context, orgID, threadID, messageID uuid.UUID, createdAt time.Time) error {
+	s.t.Helper()
+	if s.recordMessageSentFn == nil {
+		s.t.Fatalf("unexpected RecordMessageSent call")
+	}
+	return s.recordMessageSentFn(ctx, orgID, threadID, messageID, createdAt)
+}
+
 func (s *stubAuthorizationService) Check(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
 	s.t.Helper()
 	if s.checkFn == nil {
@@ -211,6 +246,70 @@ func allowAuthStub(t *testing.T) *stubAuthorizationService {
 		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
 			return &authorizationv1.CheckResponse{Allowed: true}, nil
 		},
+	}
+}
+
+func TestCreateThreadRecordsUsageWithCreatedThreadOrganization(t *testing.T) {
+	threadID := uuid.New()
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	participantID := uuid.New()
+	now := time.Now().UTC()
+	recorded := make(chan struct{}, 1)
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
+			return store.Thread{
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+				Participants: []store.Participant{
+					{ID: identityID, JoinedAt: now, Passive: false},
+					{ID: participantID, JoinedAt: now, Passive: false},
+				},
+			}, nil
+		},
+	}
+	meteringStub := &stubMeteringRecorder{
+		t: t,
+		recordThreadCreatedFn: func(ctx context.Context, orgID, recordedThreadID uuid.UUID, createdAt time.Time) error {
+			if orgID != organizationID {
+				t.Fatalf("expected metering organization %s, got %s", organizationID, orgID)
+			}
+			if recordedThreadID != threadID {
+				t.Fatalf("expected metering thread %s, got %s", threadID, recordedThreadID)
+			}
+			if !createdAt.Equal(now) {
+				t.Fatalf("expected metering created_at %s, got %s", now, createdAt)
+			}
+			recorded <- struct{}{}
+			return nil
+		},
+	}
+
+	srv := New(storeStub, nil, allowAuthStub(t), &stubIdentityResolver{t: t}, nil, meteringStub)
+	ctx := metadata.NewIncomingContext(
+		context.Background(),
+		metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", "user"),
+	)
+	_, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{
+		OrganizationId: &[]string{organizationID.String()}[0],
+		ParticipantIds: []string{participantID.String()},
+	})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+	select {
+	case <-recorded:
+	case <-time.After(time.Second):
+		t.Fatal("expected thread usage to be recorded")
 	}
 }
 
@@ -1709,6 +1808,68 @@ func TestSendMessageAuthorizationDenied(t *testing.T) {
 	}
 	if storeCalled {
 		t.Fatal("expected SendMessage not to be called")
+	}
+}
+
+func TestSendMessageRecordsUsageWithThreadOrganization(t *testing.T) {
+	threadID := uuid.New()
+	messageID := uuid.New()
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	now := time.Now().UTC()
+	recorded := make(chan struct{}, 1)
+
+	storeStub := &stubThreadStore{
+		t: t,
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+			if threadArg != threadID {
+				t.Fatalf("expected thread %s, got %s", threadID, threadArg)
+			}
+			if senderArg != identityID {
+				t.Fatalf("expected sender %s, got %s", identityID, senderArg)
+			}
+			return store.SendMessageResult{
+				Message: store.Message{
+					ID:        messageID,
+					ThreadID:  threadID,
+					SenderID:  identityID,
+					Body:      body,
+					CreatedAt: now,
+				},
+				OrganizationID: organizationID,
+			}, nil
+		},
+	}
+	meteringStub := &stubMeteringRecorder{
+		t: t,
+		recordMessageSentFn: func(ctx context.Context, orgID, recordedThreadID, recordedMessageID uuid.UUID, createdAt time.Time) error {
+			if orgID != organizationID {
+				t.Fatalf("expected metering organization %s, got %s", organizationID, orgID)
+			}
+			if recordedThreadID != threadID {
+				t.Fatalf("expected metering thread %s, got %s", threadID, recordedThreadID)
+			}
+			if recordedMessageID != messageID {
+				t.Fatalf("expected metering message %s, got %s", messageID, recordedMessageID)
+			}
+			if !createdAt.Equal(now) {
+				t.Fatalf("expected metering created_at %s, got %s", now, createdAt)
+			}
+			recorded <- struct{}{}
+			return nil
+		},
+	}
+
+	srv := New(storeStub, &stubNotifier{t: t}, allowAuthStub(t), nil, nil, meteringStub)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.SendMessage(ctx, &threadsv1.SendMessageRequest{ThreadId: threadID.String(), Body: "hi"})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	select {
+	case <-recorded:
+	case <-time.After(time.Second):
+		t.Fatal("expected message usage to be recorded")
 	}
 }
 
