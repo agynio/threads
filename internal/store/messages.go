@@ -12,8 +12,9 @@ import (
 )
 
 type SendMessageResult struct {
-	Message    Message
-	Recipients []uuid.UUID
+	Message        Message
+	OrganizationID uuid.UUID
+	Recipients     []uuid.UUID
 }
 
 func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (SendMessageResult, error) {
@@ -29,6 +30,10 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if thread.Status == ThreadStatusDegraded {
 			return ErrThreadDegraded
 		}
+		if thread.OrganizationID == nil {
+			return ErrThreadOrganizationMissing
+		}
+		organizationID := *thread.OrganizationID
 		now := time.Now().UTC()
 		messageID := uuid.New()
 		fileIDArray := pgtype.FlatArray[string](uuidsToStrings(fileIDs))
@@ -62,7 +67,8 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				FileIDs:   fileIDs,
 				CreatedAt: now,
 			},
-			Recipients: recipients,
+			OrganizationID: organizationID,
+			Recipients:     recipients,
 		}
 		return nil
 	})
