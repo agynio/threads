@@ -26,7 +26,7 @@ functions:
     fi
   patch_deployment: |-
     echo "Patching threads deployment for DevSpace..."
-    kubectl patch deployment threads-threads -n ${THREADS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
+    kubectl patch deployment threads -n ${THREADS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
     spec:
       template:
         spec:
