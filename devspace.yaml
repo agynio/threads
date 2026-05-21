@@ -88,7 +88,8 @@ pipelines:
       if [ "$(get_flag "watch")" == "true" ]; then
         start_dev --disable-pod-replace threads
       else
-        start_dev --disable-pod-replace threads
+        start_dev --disable-pod-replace threads &
+        DEVSPACE_PID=$!
         echo "Waiting for threads to be healthy on :50051..."
         healthy=false
         for i in $(seq 1 60); do
@@ -104,6 +105,7 @@ pipelines:
         fi
         echo "Dev environment ready. Stopping dev session."
         stop_dev threads
+        wait "$DEVSPACE_PID"
       fi
 
   restore-argocd:
