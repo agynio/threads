@@ -93,7 +93,7 @@ pipelines:
         echo "Waiting for threads to be healthy on :50051..."
         healthy=false
         for i in $(seq 1 60); do
-          if exec_container --label-selector=app.kubernetes.io/name=threads -n ${THREADS_NAMESPACE} -- bash -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
+          if kubectl exec deployment/threads -n ${THREADS_NAMESPACE} -c threads -- sh -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1' 2>/dev/null; then
             healthy=true
             break
           fi
