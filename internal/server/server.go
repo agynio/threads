@@ -99,7 +99,10 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 	if len(ids) == 0 && len(identifiers) == 0 && !hasInitiator {
 		return nil, status.Error(codes.InvalidArgument, "participant_ids or participants must be provided")
 	}
-	seen := make(map[uuid.UUID]struct{}, len(ids)+len(identifiers))
+	seen := make(map[uuid.UUID]struct{}, len(ids)+len(identifiers)+1)
+	if hasInitiator {
+		seen[initiator.ID] = struct{}{}
+	}
 	resolved := make([]store.ParticipantInput, 0, len(ids)+len(identifiers))
 	if len(ids) > 0 {
 		for i, raw := range ids {
@@ -205,10 +208,10 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 }
 
 func addResolvedParticipant(id uuid.UUID, initiator initiatorInfo, hasInitiator bool, seen map[uuid.UUID]struct{}, resolved *[]store.ParticipantInput, fieldName string, index int) error {
-	if hasInitiator && id == initiator.ID {
-		return status.Errorf(codes.InvalidArgument, "%s must not include initiator", fieldName)
-	}
 	if _, ok := seen[id]; ok {
+		if hasInitiator && id == initiator.ID {
+			return nil
+		}
 		return status.Errorf(codes.InvalidArgument, "%s[%d]: duplicate participant", fieldName, index)
 	}
 	seen[id] = struct{}{}

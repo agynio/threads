@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/agynio/threads/internal/store"
@@ -923,25 +924,78 @@ func TestCreateThreadNicknameRequiresOrganizationIDForUser(t *testing.T) {
 	}
 }
 
-func TestCreateThreadRejectsInitiatorInParticipants(t *testing.T) {
+func TestCreateThreadDedupesInitiatorInParticipantIDs(t *testing.T) {
 	initiatorID := uuid.New()
 	participantID := uuid.New()
 
-	srv := New(&stubThreadStore{t: t}, nil, nil, nil, nil, nil)
+	assertCreateThreadDedupesInitiator(t, initiatorID, participantID, &threadsv1.CreateThreadRequest{ParticipantIds: []string{initiatorID.String(), participantID.String()}})
+}
+
+func TestCreateThreadDedupesInitiatorInParticipants(t *testing.T) {
+	initiatorID := uuid.New()
+	participantID := uuid.New()
+
+	assertCreateThreadDedupesInitiator(t, initiatorID, participantID, &threadsv1.CreateThreadRequest{
+		Participants: []*threadsv1.ParticipantIdentifier{
+			{Identifier: &threadsv1.ParticipantIdentifier_ParticipantId{ParticipantId: initiatorID.String()}},
+			{Identifier: &threadsv1.ParticipantIdentifier_ParticipantId{ParticipantId: participantID.String()}},
+		},
+	})
+}
+
+func assertCreateThreadDedupesInitiator(t *testing.T, initiatorID, participantID uuid.UUID, req *threadsv1.CreateThreadRequest) {
+	t.Helper()
+	threadID := uuid.New()
+	organizationID := uuid.New()
+	now := time.Now().UTC()
+	storeCalled := false
+	req.OrganizationId = proto.String(organizationID.String())
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+			storeCalled = true
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
+			if len(participants) != 2 {
+				t.Fatalf("expected 2 participants, got %d", len(participants))
+			}
+			if participants[0].ID != initiatorID {
+				t.Fatalf("expected initiator %s first, got %s", initiatorID, participants[0].ID)
+			}
+			if !participants[0].Passive {
+				t.Fatal("expected agent initiator to be passive")
+			}
+			if participants[1].ID != participantID {
+				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
+			}
+			return store.Thread{
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				MessageCount:   0,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+				Participants: []store.Participant{
+					{ID: initiatorID, JoinedAt: now, Passive: true},
+					{ID: participantID, JoinedAt: now, Passive: false},
+				},
+			}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, allowAuthStub(t), &stubIdentityResolver{t: t}, nil, nil)
 	ctx := metadata.NewIncomingContext(
 		context.Background(),
-		metadata.Pairs("x-identity-id", initiatorID.String(), "x-identity-type", "agent"),
+		metadata.Pairs("x-identity-id", initiatorID.String(), "x-identity-type", "agent", "x-organization-id", organizationID.String()),
 	)
-	_, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{ParticipantIds: []string{initiatorID.String(), participantID.String()}})
-	if err == nil {
-		t.Fatal("expected error")
+	_, err := srv.CreateThread(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
 	}
-	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatalf("expected gRPC status error, got %v", err)
-	}
-	if st.Code() != codes.InvalidArgument {
-		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
+	if !storeCalled {
+		t.Fatal("expected CreateThread to be called")
 	}
 }
 
