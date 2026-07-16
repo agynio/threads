@@ -7,6 +7,9 @@ CREATE TABLE agent_inbox_deliveries (
     file_ids TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     delivered_at TIMESTAMPTZ,
+    claimed_at TIMESTAMPTZ,
+    claim_id UUID,
+    next_attempt_at TIMESTAMPTZ,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -15,4 +18,4 @@ CREATE TABLE agent_inbox_deliveries (
 
 CREATE INDEX idx_agent_inbox_deliveries_pending
     ON agent_inbox_deliveries (created_at, message_id, agent_instance_id)
-    WHERE delivered_at IS NULL;
+    WHERE delivered_at IS NULL AND claimed_at IS NULL;

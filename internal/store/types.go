@@ -8,11 +8,12 @@ import (
 )
 
 var (
-	ErrThreadNotFound            = errors.New("thread not found")
-	ErrThreadArchived            = errors.New("thread is archived")
-	ErrThreadDegraded            = errors.New("thread is degraded")
-	ErrThreadOrganizationMissing = errors.New("thread organization_id missing")
-	ErrParticipantNotInThread    = errors.New("participant not in thread")
+	ErrThreadNotFound               = errors.New("thread not found")
+	ErrThreadArchived               = errors.New("thread is archived")
+	ErrThreadDegraded               = errors.New("thread is degraded")
+	ErrThreadOrganizationMissing    = errors.New("thread organization_id missing")
+	ErrParticipantNotInThread       = errors.New("participant not in thread")
+	ErrAgentInboxDeliveryNotClaimed = errors.New("agent inbox delivery not claimed")
 )
 
 type ThreadStatus int16

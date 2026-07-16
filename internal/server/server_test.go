@@ -23,21 +23,21 @@ import (
 )
 
 type stubThreadStore struct {
-	t                                 *testing.T
-	createThreadFn                    func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
-	archiveThreadFn                   func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	degradeThreadFn                   func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	addParticipantFn                  func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
-	sendMessageFn                     func(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error)
-	listPendingAgentInboxDeliveriesFn func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
-	markAgentInboxDeliveryDeliveredFn func(ctx context.Context, messageID, agentInstanceID uuid.UUID) error
-	markAgentInboxDeliveryFailedFn    func(ctx context.Context, messageID, agentInstanceID uuid.UUID, deliveryError string) error
-	getThreadFn                       func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	listOrgThreadsFn                  func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
-	listMessagesFn                    func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
-	listUnackedFn                     func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
-	unackedCountsFn                   func(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
-	ackMessagesFn                     func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
+	t                                  *testing.T
+	createThreadFn                     func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
+	archiveThreadFn                    func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	degradeThreadFn                    func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	addParticipantFn                   func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
+	sendMessageFn                      func(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error)
+	claimPendingAgentInboxDeliveriesFn func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
+	markAgentInboxDeliveryDeliveredFn  func(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error
+	markAgentInboxDeliveryFailedFn     func(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error
+	getThreadFn                        func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	listOrgThreadsFn                   func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
+	listMessagesFn                     func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
+	listUnackedFn                      func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
+	unackedCountsFn                    func(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
+	ackMessagesFn                      func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
 }
 
 func (s *stubThreadStore) unexpectedCall(method string) {
@@ -85,28 +85,28 @@ func (s *stubThreadStore) SendMessage(ctx context.Context, threadID uuid.UUID, s
 	return s.sendMessageFn(ctx, threadID, senderID, body, fileIDs, messageRecipientIDs, agentInstanceRecipientIDs)
 }
 
-func (s *stubThreadStore) ListPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+func (s *stubThreadStore) ClaimPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
 	s.t.Helper()
-	if s.listPendingAgentInboxDeliveriesFn == nil {
+	if s.claimPendingAgentInboxDeliveriesFn == nil {
 		return nil, nil
 	}
-	return s.listPendingAgentInboxDeliveriesFn(ctx, limit)
+	return s.claimPendingAgentInboxDeliveriesFn(ctx, limit)
 }
 
-func (s *stubThreadStore) MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID uuid.UUID) error {
+func (s *stubThreadStore) MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error {
 	s.t.Helper()
 	if s.markAgentInboxDeliveryDeliveredFn == nil {
 		return nil
 	}
-	return s.markAgentInboxDeliveryDeliveredFn(ctx, messageID, agentInstanceID)
+	return s.markAgentInboxDeliveryDeliveredFn(ctx, messageID, agentInstanceID, claimID)
 }
 
-func (s *stubThreadStore) MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID uuid.UUID, deliveryError string) error {
+func (s *stubThreadStore) MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error {
 	s.t.Helper()
 	if s.markAgentInboxDeliveryFailedFn == nil {
 		return nil
 	}
-	return s.markAgentInboxDeliveryFailedFn(ctx, messageID, agentInstanceID, deliveryError)
+	return s.markAgentInboxDeliveryFailedFn(ctx, messageID, agentInstanceID, claimID, deliveryError)
 }
 
 func (s *stubThreadStore) GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error) {
@@ -2936,6 +2936,9 @@ func TestSendMessageFansOutAgentInstancesOnly(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
+		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "hi", FileIDs: []uuid.UUID{}, ClaimID: uuid.New()}}, nil
+		},
 		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
 			return store.Thread{ID: threadID, OrganizationID: &organizationID, Participants: []store.Participant{{ID: senderID}, {ID: userRecipientID}, {ID: agentInstanceID}}}, nil
 		},
@@ -3022,19 +3025,20 @@ func TestDrainPendingAgentInboxDeliveriesMarksDelivered(t *testing.T) {
 	threadID := uuid.New()
 	senderID := uuid.New()
 	agentInstanceID := uuid.New()
+	claimID := uuid.New()
 	var marked bool
 	storeStub := &stubThreadStore{
 		t: t,
-		listPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
 			if limit != agentInboxDeliveryLimit {
 				t.Fatalf("expected limit %d, got %d", agentInboxDeliveryLimit, limit)
 			}
-			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "hi"}}, nil
+			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, ClaimID: claimID, Body: "hi"}}, nil
 		},
-		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg uuid.UUID) error {
+		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID) error {
 			marked = true
-			if messageArg != messageID || agentInstanceArg != agentInstanceID {
-				t.Fatalf("unexpected delivered mark: %s %s", messageArg, agentInstanceArg)
+			if messageArg != messageID || agentInstanceArg != agentInstanceID || claimArg != claimID {
+				t.Fatalf("unexpected delivered mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
 			}
 			return nil
 		},
@@ -3055,5 +3059,77 @@ func TestDrainPendingAgentInboxDeliveriesMarksDelivered(t *testing.T) {
 	}
 	if !marked {
 		t.Fatal("expected delivered mark")
+	}
+}
+
+func TestDrainPendingAgentInboxDeliveriesContinuesAfterFailure(t *testing.T) {
+	failedMessageID := uuid.New()
+	succeededMessageID := uuid.New()
+	threadID := uuid.New()
+	senderID := uuid.New()
+	failedAgentInstanceID := uuid.New()
+	succeededAgentInstanceID := uuid.New()
+	failedClaimID := uuid.New()
+	succeededClaimID := uuid.New()
+	fanoutCalls := make([]uuid.UUID, 0, 2)
+	failedMarked := false
+	deliveredMarked := false
+	storeStub := &stubThreadStore{
+		t: t,
+		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+			return []store.AgentInboxDelivery{
+				{MessageID: failedMessageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: failedAgentInstanceID, ClaimID: failedClaimID, Body: "first"},
+				{MessageID: succeededMessageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: succeededAgentInstanceID, ClaimID: succeededClaimID, Body: "second"},
+			}, nil
+		},
+		markAgentInboxDeliveryFailedFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID, deliveryError string) error {
+			failedMarked = true
+			if messageArg != failedMessageID || agentInstanceArg != failedAgentInstanceID || claimArg != failedClaimID {
+				t.Fatalf("unexpected failed mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			if deliveryError == "" {
+				t.Fatal("expected delivery error")
+			}
+			return nil
+		},
+		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID) error {
+			deliveredMarked = true
+			if messageArg != succeededMessageID || agentInstanceArg != succeededAgentInstanceID || claimArg != succeededClaimID {
+				t.Fatalf("unexpected delivered mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			return nil
+		},
+	}
+	agentsStub := &stubAgentsService{
+		t: t,
+		fanoutFn: func(ctx context.Context, req *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error) {
+			messageID, err := uuid.Parse(req.GetMessageId())
+			if err != nil {
+				t.Fatalf("parse message id: %v", err)
+			}
+			fanoutCalls = append(fanoutCalls, messageID)
+			if messageID == failedMessageID {
+				return nil, status.Error(codes.Unavailable, "agents unavailable")
+			}
+			return &agentsv1.FanoutInboxItemResponse{}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, agentsStub, nil)
+	err := srv.DrainPendingAgentInboxDeliveries(context.Background())
+	if err == nil {
+		t.Fatal("expected drain error")
+	}
+	if len(fanoutCalls) != 2 {
+		t.Fatalf("expected 2 fanout calls, got %d", len(fanoutCalls))
+	}
+	if fanoutCalls[0] != failedMessageID || fanoutCalls[1] != succeededMessageID {
+		t.Fatalf("unexpected fanout order: %v", fanoutCalls)
+	}
+	if !failedMarked {
+		t.Fatal("expected failed mark")
+	}
+	if !deliveredMarked {
+		t.Fatal("expected delivered mark after failure")
 	}
 }

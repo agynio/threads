@@ -59,9 +59,9 @@ type threadStore interface {
 	ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
 	GetUnackedMessageCounts(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
 	AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
-	ListPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
-	MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID uuid.UUID) error
-	MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID uuid.UUID, deliveryError string) error
+	ClaimPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
+	MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error
+	MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error
 }
 
 type identityResolver interface {
@@ -530,7 +530,10 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 		return nil, toStatusError(err)
 	}
 	s.recordMessageSent(ctx, result)
-	if err := s.deliverAgentInboxDeliveries(ctx, result.AgentInboxDeliveries); err != nil {
+	if len(result.AgentInboxDeliveries) > 0 {
+		err = s.DrainPendingAgentInboxDeliveries(ctx)
+	}
+	if err != nil {
 		log.Printf("agent inbox delivery: %v", err)
 	}
 	if err := s.notifier.PublishMessageCreated(ctx, threadID, result.Message.ID, result.Recipients); err != nil {
@@ -575,12 +578,13 @@ func (s *Server) deliveryRecipients(ctx context.Context, participants []store.Pa
 }
 
 func (s *Server) deliverAgentInboxDeliveries(ctx context.Context, deliveries []store.AgentInboxDelivery) error {
+	errs := make([]error, 0)
 	for _, delivery := range deliveries {
 		if err := s.deliverAgentInboxDelivery(ctx, delivery); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *Server) deliverAgentInboxDelivery(ctx context.Context, delivery store.AgentInboxDelivery) error {
@@ -601,19 +605,19 @@ func (s *Server) deliverAgentInboxDelivery(ctx context.Context, delivery store.A
 	})
 	if err != nil {
 		message := fmt.Sprintf("fanout inbox item: %v", err)
-		if markErr := s.store.MarkAgentInboxDeliveryFailed(ctx, delivery.MessageID, delivery.AgentInstanceID, message); markErr != nil {
+		if markErr := s.store.MarkAgentInboxDeliveryFailed(ctx, delivery.MessageID, delivery.AgentInstanceID, delivery.ClaimID, message); markErr != nil {
 			return status.Errorf(codes.Internal, "%s; mark failed: %v", message, markErr)
 		}
 		return status.Error(codes.Internal, message)
 	}
-	if err := s.store.MarkAgentInboxDeliveryDelivered(ctx, delivery.MessageID, delivery.AgentInstanceID); err != nil {
+	if err := s.store.MarkAgentInboxDeliveryDelivered(ctx, delivery.MessageID, delivery.AgentInstanceID, delivery.ClaimID); err != nil {
 		return status.Errorf(codes.Internal, "mark agent inbox delivery delivered: %v", err)
 	}
 	return nil
 }
 
 func (s *Server) DrainPendingAgentInboxDeliveries(ctx context.Context) error {
-	deliveries, err := s.store.ListPendingAgentInboxDeliveries(ctx, agentInboxDeliveryLimit)
+	deliveries, err := s.store.ClaimPendingAgentInboxDeliveries(ctx, agentInboxDeliveryLimit)
 	if err != nil {
 		return status.Errorf(codes.Internal, "list pending agent inbox deliveries: %v", err)
 	}

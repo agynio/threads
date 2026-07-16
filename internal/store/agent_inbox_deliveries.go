@@ -9,6 +9,31 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const (
+	agentInboxDeliveryClaimTimeout = time.Minute
+	agentInboxDeliveryRetryDelay   = time.Minute
+)
+
+const claimPendingAgentInboxDeliveriesSQL = `WITH claimed AS (
+		SELECT message_id, agent_instance_id
+		FROM agent_inbox_deliveries
+		WHERE delivered_at IS NULL
+			AND (claimed_at IS NULL OR claimed_at < $2)
+			AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+		ORDER BY created_at ASC, message_id ASC, agent_instance_id ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	)
+	UPDATE agent_inbox_deliveries d
+	SET claimed_at = NOW(), claim_id = $3, updated_at = NOW()
+	FROM claimed
+	WHERE d.message_id = claimed.message_id AND d.agent_instance_id = claimed.agent_instance_id
+	RETURNING d.message_id, d.agent_instance_id, d.thread_id, d.sender_id, d.body, d.file_ids, d.created_at, d.delivered_at, d.claimed_at, d.claim_id, d.next_attempt_at, d.attempts, d.last_error, d.updated_at`
+
+const markAgentInboxDeliveryDeliveredSQL = `UPDATE agent_inbox_deliveries SET delivered_at = $4, claimed_at = NULL, claim_id = NULL, next_attempt_at = NULL, updated_at = $4, last_error = NULL WHERE message_id = $1 AND agent_instance_id = $2 AND claim_id = $3 AND delivered_at IS NULL`
+
+const markAgentInboxDeliveryFailedSQL = `UPDATE agent_inbox_deliveries SET attempts = attempts + 1, claimed_at = NULL, claim_id = NULL, next_attempt_at = $5, last_error = $4, updated_at = $6 WHERE message_id = $1 AND agent_instance_id = $2 AND claim_id = $3 AND delivered_at IS NULL`
+
 type AgentInboxDelivery struct {
 	MessageID       uuid.UUID
 	AgentInstanceID uuid.UUID
@@ -18,20 +43,21 @@ type AgentInboxDelivery struct {
 	FileIDs         []uuid.UUID
 	CreatedAt       time.Time
 	DeliveredAt     *time.Time
+	ClaimedAt       *time.Time
+	ClaimID         uuid.UUID
+	NextAttemptAt   *time.Time
 	Attempts        int32
 	LastError       *string
 	UpdatedAt       time.Time
 }
 
-func (s *Store) ListPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]AgentInboxDelivery, error) {
+func (s *Store) ClaimPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]AgentInboxDelivery, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT message_id, agent_instance_id, thread_id, sender_id, body, file_ids, created_at, delivered_at, attempts, last_error, updated_at
-		FROM agent_inbox_deliveries
-		WHERE delivered_at IS NULL
-		ORDER BY created_at ASC, message_id ASC, agent_instance_id ASC
-		LIMIT $1`, limit)
+	claimID := uuid.New()
+	claimBefore := time.Now().UTC().Add(-agentInboxDeliveryClaimTimeout)
+	rows, err := s.pool.Query(ctx, claimPendingAgentInboxDeliveriesSQL, limit, claimBefore, claimID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,22 +77,35 @@ func (s *Store) ListPendingAgentInboxDeliveries(ctx context.Context, limit int32
 	return deliveries, nil
 }
 
-func (s *Store) MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID uuid.UUID) error {
+func (s *Store) MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error {
 	now := time.Now().UTC()
-	_, err := s.pool.Exec(ctx, `UPDATE agent_inbox_deliveries SET delivered_at = $3, updated_at = $3, last_error = NULL WHERE message_id = $1 AND agent_instance_id = $2`, messageID, agentInstanceID, now)
-	return err
+	cmd, err := s.pool.Exec(ctx, markAgentInboxDeliveryDeliveredSQL, messageID, agentInstanceID, claimID, now)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrAgentInboxDeliveryNotClaimed
+	}
+	return nil
 }
 
-func (s *Store) MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID uuid.UUID, deliveryError string) error {
+func (s *Store) MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error {
 	now := time.Now().UTC()
-	_, err := s.pool.Exec(ctx, `UPDATE agent_inbox_deliveries SET attempts = attempts + 1, last_error = $3, updated_at = $4 WHERE message_id = $1 AND agent_instance_id = $2 AND delivered_at IS NULL`, messageID, agentInstanceID, deliveryError, now)
-	return err
+	nextAttemptAt := now.Add(agentInboxDeliveryRetryDelay)
+	cmd, err := s.pool.Exec(ctx, markAgentInboxDeliveryFailedSQL, messageID, agentInstanceID, claimID, deliveryError, nextAttemptAt, now)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrAgentInboxDeliveryNotClaimed
+	}
+	return nil
 }
 
 func scanAgentInboxDelivery(row pgx.Row) (AgentInboxDelivery, error) {
 	var delivery AgentInboxDelivery
 	var fileIDs []string
-	if err := row.Scan(&delivery.MessageID, &delivery.AgentInstanceID, &delivery.ThreadID, &delivery.SenderID, &delivery.Body, &fileIDs, &delivery.CreatedAt, &delivery.DeliveredAt, &delivery.Attempts, &delivery.LastError, &delivery.UpdatedAt); err != nil {
+	if err := row.Scan(&delivery.MessageID, &delivery.AgentInstanceID, &delivery.ThreadID, &delivery.SenderID, &delivery.Body, &fileIDs, &delivery.CreatedAt, &delivery.DeliveredAt, &delivery.ClaimedAt, &delivery.ClaimID, &delivery.NextAttemptAt, &delivery.Attempts, &delivery.LastError, &delivery.UpdatedAt); err != nil {
 		return AgentInboxDelivery{}, err
 	}
 	parsedFileIDs, err := stringsToUUIDs(fileIDs)
