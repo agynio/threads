@@ -17,7 +17,7 @@ type SendMessageResult struct {
 	Recipients     []uuid.UUID
 }
 
-func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (SendMessageResult, error) {
+func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, recipients []uuid.UUID) (SendMessageResult, error) {
 	var result SendMessageResult
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
 		thread, err := loadThreadRow(ctx, tx, threadID, true)
@@ -40,12 +40,6 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if _, err := tx.Exec(ctx, `INSERT INTO messages (id, thread_id, sender_id, body, file_ids, created_at) VALUES ($1, $2, $3, $4, $5, $6)`, messageID, threadID, senderID, body, fileIDArray, now); err != nil {
 			return err
 		}
-		recipients, err := loadRecipients(ctx, tx, threadID, senderID)
-		if err != nil {
-			return err
-		}
-		// Passive participants still receive message notifications; workload
-		// triggers are handled downstream.
 		if len(recipients) > 0 {
 			rows := make([][]any, len(recipients))
 			for i, recipientID := range recipients {
@@ -76,27 +70,6 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		return SendMessageResult{}, err
 	}
 	return result, nil
-}
-
-func loadRecipients(ctx context.Context, q queryer, threadID, senderID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.Query(ctx, `SELECT participant_id FROM thread_participants WHERE thread_id = $1 AND participant_id <> $2 ORDER BY participant_id ASC`, threadID, senderID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	recipients := []uuid.UUID{}
-	for rows.Next() {
-		var recipientID uuid.UUID
-		if err := rows.Scan(&recipientID); err != nil {
-			return nil, err
-		}
-		recipients = append(recipients, recipientID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return recipients, nil
 }
 
 func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *MessageCursor, order MessageOrder) (MessageListResult, error) {
