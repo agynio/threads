@@ -33,15 +33,17 @@ type Server struct {
 }
 
 const (
-	organizationIDMetadataKey = "x-organization-id"
-	identityIDMetadataKey     = "x-identity-id"
-	identityTypeMetadataKey   = "x-identity-type"
-	agentIdentityType         = "agent"
-	agentInstanceIdentityType = "agent_instance"
-	meteringTimeout           = 5 * time.Second
-	identityObjectPrefix      = "identity:"
-	organizationObjectPrefix  = "organization:"
-	threadObjectPrefix        = "thread:"
+	organizationIDMetadataKey  = "x-organization-id"
+	identityIDMetadataKey      = "x-identity-id"
+	identityTypeMetadataKey    = "x-identity-type"
+	agentIdentityType          = "agent"
+	agentInstanceIdentityType  = "agent_instance"
+	meteringTimeout            = 5 * time.Second
+	agentInboxDeliveryInterval = 5 * time.Second
+	agentInboxDeliveryLimit    = 100
+	identityObjectPrefix       = "identity:"
+	organizationObjectPrefix   = "organization:"
+	threadObjectPrefix         = "thread:"
 )
 
 type threadStore interface {
@@ -49,7 +51,7 @@ type threadStore interface {
 	ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	DegradeThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
-	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID) (store.SendMessageResult, error)
+	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error)
 	GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	ListThreads(ctx context.Context, participantID uuid.UUID, pageSize int32, cursor *store.ThreadCursor) (store.ThreadListResult, error)
 	ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
@@ -57,6 +59,9 @@ type threadStore interface {
 	ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
 	GetUnackedMessageCounts(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
 	AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
+	ListPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
+	MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID uuid.UUID) error
+	MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID uuid.UUID, deliveryError string) error
 }
 
 type identityResolver interface {
@@ -302,11 +307,17 @@ func (s *Server) identityTypes(ctx context.Context, ids []uuid.UUID) (map[uuid.U
 		if _, ok := requestedIDs[identityID]; !ok {
 			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: unexpected identity", i)
 		}
+		if _, ok := typesByID[identityID]; ok {
+			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: duplicate identity", i)
+		}
 		typesByID[identityID] = entry.GetIdentityType()
+	}
+	if len(response.GetEntries()) != len(ids) {
+		return nil, status.Errorf(codes.Internal, "batch get identity types: expected %d entries, got %d", len(ids), len(response.GetEntries()))
 	}
 	for _, id := range ids {
 		if _, ok := typesByID[id]; !ok {
-			typesByID[id] = identityv1.IdentityType_IDENTITY_TYPE_UNSPECIFIED
+			return nil, status.Errorf(codes.Internal, "batch get identity types: missing identity %s", id.String())
 		}
 	}
 	return typesByID, nil
@@ -514,13 +525,13 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs, messageRecipients)
+	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs, messageRecipients, agentInstanceRecipients)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 	s.recordMessageSent(ctx, result)
-	if err := s.fanoutInboxItems(ctx, agentInstanceRecipients, result.Message); err != nil {
-		return nil, err
+	if err := s.deliverAgentInboxDeliveries(ctx, result.AgentInboxDeliveries); err != nil {
+		log.Printf("agent inbox delivery: %v", err)
 	}
 	if err := s.notifier.PublishMessageCreated(ctx, threadID, result.Message.ID, result.Recipients); err != nil {
 		return nil, status.Errorf(codes.Internal, "notify recipients: %v", err)
@@ -563,31 +574,70 @@ func (s *Server) deliveryRecipients(ctx context.Context, participants []store.Pa
 	return messageRecipients, agentInstanceRecipients, nil
 }
 
-func (s *Server) fanoutInboxItems(ctx context.Context, agentInstanceIDs []uuid.UUID, message store.Message) error {
-	if len(agentInstanceIDs) == 0 {
-		return nil
-	}
-	if s.agents == nil {
-		return status.Error(codes.Internal, "agents service not configured")
-	}
-	fileIDs := make([]string, len(message.FileIDs))
-	for i, fileID := range message.FileIDs {
-		fileIDs[i] = fileID.String()
-	}
-	for _, agentInstanceID := range agentInstanceIDs {
-		_, err := s.agents.FanoutInboxItem(ctx, &agentsv1.FanoutInboxItemRequest{
-			AgentInstanceId: agentInstanceID.String(),
-			ThreadId:        message.ThreadID.String(),
-			MessageId:       message.ID.String(),
-			SenderId:        message.SenderID.String(),
-			Body:            message.Body,
-			FileIds:         fileIDs,
-		})
-		if err != nil {
-			return status.Errorf(codes.Internal, "fanout inbox item: %v", err)
+func (s *Server) deliverAgentInboxDeliveries(ctx context.Context, deliveries []store.AgentInboxDelivery) error {
+	for _, delivery := range deliveries {
+		if err := s.deliverAgentInboxDelivery(ctx, delivery); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Server) deliverAgentInboxDelivery(ctx context.Context, delivery store.AgentInboxDelivery) error {
+	if s.agents == nil {
+		return status.Error(codes.Internal, "agents service not configured")
+	}
+	fileIDs := make([]string, len(delivery.FileIDs))
+	for i, fileID := range delivery.FileIDs {
+		fileIDs[i] = fileID.String()
+	}
+	_, err := s.agents.FanoutInboxItem(ctx, &agentsv1.FanoutInboxItemRequest{
+		AgentInstanceId: delivery.AgentInstanceID.String(),
+		ThreadId:        delivery.ThreadID.String(),
+		MessageId:       delivery.MessageID.String(),
+		SenderId:        delivery.SenderID.String(),
+		Body:            delivery.Body,
+		FileIds:         fileIDs,
+	})
+	if err != nil {
+		message := fmt.Sprintf("fanout inbox item: %v", err)
+		if markErr := s.store.MarkAgentInboxDeliveryFailed(ctx, delivery.MessageID, delivery.AgentInstanceID, message); markErr != nil {
+			return status.Errorf(codes.Internal, "%s; mark failed: %v", message, markErr)
+		}
+		return status.Error(codes.Internal, message)
+	}
+	if err := s.store.MarkAgentInboxDeliveryDelivered(ctx, delivery.MessageID, delivery.AgentInstanceID); err != nil {
+		return status.Errorf(codes.Internal, "mark agent inbox delivery delivered: %v", err)
+	}
+	return nil
+}
+
+func (s *Server) DrainPendingAgentInboxDeliveries(ctx context.Context) error {
+	deliveries, err := s.store.ListPendingAgentInboxDeliveries(ctx, agentInboxDeliveryLimit)
+	if err != nil {
+		return status.Errorf(codes.Internal, "list pending agent inbox deliveries: %v", err)
+	}
+	return s.deliverAgentInboxDeliveries(ctx, deliveries)
+}
+
+func (s *Server) StartAgentInboxDeliveryWorker(ctx context.Context) {
+	go func() {
+		if err := s.DrainPendingAgentInboxDeliveries(ctx); err != nil {
+			log.Printf("agent inbox delivery drain: %v", err)
+		}
+		ticker := time.NewTicker(agentInboxDeliveryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := s.DrainPendingAgentInboxDeliveries(ctx); err != nil {
+					log.Printf("agent inbox delivery drain: %v", err)
+				}
+			}
+		}
+	}()
 }
 
 func (s *Server) GetThreads(ctx context.Context, req *threadsv1.GetThreadsRequest) (*threadsv1.GetThreadsResponse, error) {

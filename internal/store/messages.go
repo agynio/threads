@@ -12,12 +12,13 @@ import (
 )
 
 type SendMessageResult struct {
-	Message        Message
-	OrganizationID uuid.UUID
-	Recipients     []uuid.UUID
+	Message              Message
+	OrganizationID       uuid.UUID
+	Recipients           []uuid.UUID
+	AgentInboxDeliveries []AgentInboxDelivery
 }
 
-func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, recipients []uuid.UUID) (SendMessageResult, error) {
+func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, recipients []uuid.UUID, agentInstanceRecipients []uuid.UUID) (SendMessageResult, error) {
 	var result SendMessageResult
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
 		thread, err := loadThreadRow(ctx, tx, threadID, true)
@@ -49,6 +50,26 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				return err
 			}
 		}
+		agentInboxDeliveries := make([]AgentInboxDelivery, len(agentInstanceRecipients))
+		if len(agentInstanceRecipients) > 0 {
+			rows := make([][]any, len(agentInstanceRecipients))
+			for i, agentInstanceID := range agentInstanceRecipients {
+				rows[i] = []any{messageID, agentInstanceID, threadID, senderID, body, fileIDArray, now, now}
+				agentInboxDeliveries[i] = AgentInboxDelivery{
+					MessageID:       messageID,
+					AgentInstanceID: agentInstanceID,
+					ThreadID:        threadID,
+					SenderID:        senderID,
+					Body:            body,
+					FileIDs:         fileIDs,
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}
+			}
+			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"agent_inbox_deliveries"}, []string{"message_id", "agent_instance_id", "thread_id", "sender_id", "body", "file_ids", "created_at", "updated_at"}, pgx.CopyFromRows(rows)); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE threads SET updated_at = $2, message_count = message_count + 1 WHERE id = $1`, threadID, now); err != nil {
 			return err
 		}
@@ -61,8 +82,9 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				FileIDs:   fileIDs,
 				CreatedAt: now,
 			},
-			OrganizationID: organizationID,
-			Recipients:     recipients,
+			OrganizationID:       organizationID,
+			Recipients:           recipients,
+			AgentInboxDeliveries: agentInboxDeliveries,
 		}
 		return nil
 	})
