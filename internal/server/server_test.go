@@ -2931,13 +2931,25 @@ func TestSendMessageFansOutAgentInstancesOnly(t *testing.T) {
 	senderID := uuid.New()
 	userRecipientID := uuid.New()
 	agentInstanceID := uuid.New()
+	claimID := uuid.New()
 	now := time.Now().UTC()
 	var fanoutCalled bool
+	var deliveredMarked bool
 
 	storeStub := &stubThreadStore{
 		t: t,
 		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
-			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "hi", FileIDs: []uuid.UUID{}, ClaimID: uuid.New()}}, nil
+			if limit != agentInboxDeliveryLimit {
+				t.Fatalf("expected limit %d, got %d", agentInboxDeliveryLimit, limit)
+			}
+			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "claimed", FileIDs: []uuid.UUID{}, ClaimID: claimID}}, nil
+		},
+		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID) error {
+			deliveredMarked = true
+			if messageArg != messageID || agentInstanceArg != agentInstanceID || claimArg != claimID {
+				t.Fatalf("unexpected delivered mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			return nil
 		},
 		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
 			return store.Thread{ID: threadID, OrganizationID: &organizationID, Participants: []store.Participant{{ID: senderID}, {ID: userRecipientID}, {ID: agentInstanceID}}}, nil
@@ -2949,7 +2961,7 @@ func TestSendMessageFansOutAgentInstancesOnly(t *testing.T) {
 			if !reflect.DeepEqual(agentInstanceRecipientIDs, []uuid.UUID{agentInstanceID}) {
 				t.Fatalf("expected agent instance recipients, got %v", agentInstanceRecipientIDs)
 			}
-			return store.SendMessageResult{Message: store.Message{ID: messageID, ThreadID: threadID, SenderID: senderID, Body: body, FileIDs: fileIDs, CreatedAt: now}, OrganizationID: organizationID, Recipients: messageRecipientIDs, AgentInboxDeliveries: []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: body, FileIDs: fileIDs}}}, nil
+			return store.SendMessageResult{Message: store.Message{ID: messageID, ThreadID: threadID, SenderID: senderID, Body: body, FileIDs: fileIDs, CreatedAt: now}, OrganizationID: organizationID, Recipients: messageRecipientIDs, AgentInboxDeliveries: []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "unclaimed", FileIDs: fileIDs}}}, nil
 		},
 	}
 	identityStub := &stubIdentityResolver{
@@ -2973,6 +2985,9 @@ func TestSendMessageFansOutAgentInstancesOnly(t *testing.T) {
 			if req.GetAgentInstanceId() != agentInstanceID.String() || req.GetThreadId() != threadID.String() || req.GetMessageId() != messageID.String() || req.GetSenderId() != senderID.String() {
 				t.Fatalf("unexpected fanout request: %+v", req)
 			}
+			if req.GetBody() != "claimed" {
+				t.Fatalf("expected claimed outbox row body, got %q", req.GetBody())
+			}
 			return &agentsv1.FanoutInboxItemResponse{}, nil
 		},
 	}
@@ -2991,6 +3006,9 @@ func TestSendMessageFansOutAgentInstancesOnly(t *testing.T) {
 	}
 	if !fanoutCalled {
 		t.Fatal("expected agent instance fanout")
+	}
+	if !deliveredMarked {
+		t.Fatal("expected claimed delivery to be marked delivered")
 	}
 }
 
