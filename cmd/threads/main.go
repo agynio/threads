@@ -90,14 +90,18 @@ func run() error {
 	threadsServer := grpc.NewServer()
 	threadsv1.RegisterThreadsServiceServer(
 		threadsServer,
-		server.New(
-			store.NewStore(pool),
-			notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn)),
-			authorizationv1.NewAuthorizationServiceClient(authorizationConn),
-			identityv1.NewIdentityServiceClient(identityConn),
-			agentsv1.NewAgentsServiceClient(agentsConn),
-			metering.New(meteringv1.NewMeteringServiceClient(meteringConn)),
-		),
+		func() *server.Server {
+			threadsService := server.New(
+				store.NewStore(pool),
+				notifier.New(notificationsv1.NewNotificationsServiceClient(notificationsConn)),
+				authorizationv1.NewAuthorizationServiceClient(authorizationConn),
+				identityv1.NewIdentityServiceClient(identityConn),
+				agentsv1.NewAgentsServiceClient(agentsConn),
+				metering.New(meteringv1.NewMeteringServiceClient(meteringConn)),
+			)
+			threadsService.StartAgentInboxDeliveryWorker(ctx)
+			return threadsService
+		}(),
 	)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)

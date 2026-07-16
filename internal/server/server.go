@@ -33,14 +33,17 @@ type Server struct {
 }
 
 const (
-	organizationIDMetadataKey = "x-organization-id"
-	identityIDMetadataKey     = "x-identity-id"
-	identityTypeMetadataKey   = "x-identity-type"
-	agentIdentityType         = "agent"
-	meteringTimeout           = 5 * time.Second
-	identityObjectPrefix      = "identity:"
-	organizationObjectPrefix  = "organization:"
-	threadObjectPrefix        = "thread:"
+	organizationIDMetadataKey  = "x-organization-id"
+	identityIDMetadataKey      = "x-identity-id"
+	identityTypeMetadataKey    = "x-identity-type"
+	agentIdentityType          = "agent"
+	agentInstanceIdentityType  = "agent_instance"
+	meteringTimeout            = 5 * time.Second
+	agentInboxDeliveryInterval = 5 * time.Second
+	agentInboxDeliveryLimit    = 100
+	identityObjectPrefix       = "identity:"
+	organizationObjectPrefix   = "organization:"
+	threadObjectPrefix         = "thread:"
 )
 
 type threadStore interface {
@@ -48,7 +51,7 @@ type threadStore interface {
 	ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	DegradeThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
-	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
+	SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error)
 	GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	ListThreads(ctx context.Context, participantID uuid.UUID, pageSize int32, cursor *store.ThreadCursor) (store.ThreadListResult, error)
 	ListOrganizationThreads(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
@@ -56,6 +59,9 @@ type threadStore interface {
 	ListUnackedMessages(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
 	GetUnackedMessageCounts(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
 	AckMessages(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
+	ClaimPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
+	MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error
+	MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error
 }
 
 type identityResolver interface {
@@ -66,6 +72,9 @@ type identityResolver interface {
 
 type agentsService interface {
 	GetAgent(ctx context.Context, in *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error)
+	CreateInstance(ctx context.Context, in *agentsv1.CreateInstanceRequest, opts ...grpc.CallOption) (*agentsv1.CreateInstanceResponse, error)
+	GetInstance(ctx context.Context, in *agentsv1.GetInstanceRequest, opts ...grpc.CallOption) (*agentsv1.GetInstanceResponse, error)
+	FanoutInboxItem(ctx context.Context, in *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error)
 }
 
 type authorizationChecker interface {
@@ -172,10 +181,15 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 	}
 	participants := make([]store.ParticipantInput, 0, capacity)
 	if hasInitiator {
-		participants = append(participants, store.ParticipantInput{ID: initiator.ID, Passive: initiator.Passive})
+		participants = append(participants, store.ParticipantInput{ID: initiator.ID, Passive: false})
 	}
 	participants = append(participants, resolved...)
-	if err := s.requireCanInitiateAgentParticipants(ctx, identityID, participants); err != nil {
+	finalParticipants, agentClassIDs, err := s.finalizeParticipants(ctx, participants, initiator.ID, hasInitiator)
+	if err != nil {
+		return nil, err
+	}
+	participants = finalParticipants
+	if err := s.requireCanInitiateAgentClasses(ctx, identityID, agentClassIDs); err != nil {
 		return nil, err
 	}
 
@@ -219,12 +233,8 @@ func addResolvedParticipant(id uuid.UUID, initiator initiatorInfo, hasInitiator 
 	return nil
 }
 
-func (s *Server) requireCanInitiateAgentParticipants(ctx context.Context, callerID uuid.UUID, participants []store.ParticipantInput) error {
-	agentIDs, err := s.agentParticipantIDs(ctx, participants)
-	if err != nil {
-		return err
-	}
-	for _, agentID := range agentIDs {
+func (s *Server) requireCanInitiateAgentClasses(ctx context.Context, callerID uuid.UUID, agentClassIDs []uuid.UUID) error {
+	for _, agentID := range agentClassIDs {
 		if err := s.requireAllowed(ctx, callerID, "can_initiate", fmt.Sprintf("agent:%s", agentID.String())); err != nil {
 			return err
 		}
@@ -232,18 +242,50 @@ func (s *Server) requireCanInitiateAgentParticipants(ctx context.Context, caller
 	return nil
 }
 
-func (s *Server) agentParticipantIDs(ctx context.Context, participants []store.ParticipantInput) ([]uuid.UUID, error) {
+func (s *Server) finalizeParticipants(ctx context.Context, participants []store.ParticipantInput, initiatorID uuid.UUID, hasInitiator bool) ([]store.ParticipantInput, []uuid.UUID, error) {
 	if len(participants) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
+	ids := make([]uuid.UUID, len(participants))
+	for i, participant := range participants {
+		ids[i] = participant.ID
+	}
+	typesByID, err := s.identityTypes(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	finalParticipants := make([]store.ParticipantInput, 0, len(participants))
+	seen := make(map[uuid.UUID]struct{}, len(participants))
+	agentClassIDs := make([]uuid.UUID, 0)
+	for i, participant := range participants {
+		storedID, agentClassID, err := s.finalParticipantID(ctx, participant.ID, typesByID[participant.ID])
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, ok := seen[storedID]; ok {
+			if hasInitiator && storedID == initiatorID {
+				continue
+			}
+			return nil, nil, status.Errorf(codes.InvalidArgument, "participants[%d]: duplicate participant", i)
+		}
+		seen[storedID] = struct{}{}
+		finalParticipants = append(finalParticipants, store.ParticipantInput{ID: storedID, Passive: false})
+		if agentClassID != uuid.Nil {
+			agentClassIDs = append(agentClassIDs, agentClassID)
+		}
+	}
+	return finalParticipants, agentClassIDs, nil
+}
+
+func (s *Server) identityTypes(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]identityv1.IdentityType, error) {
 	if s.identity == nil {
 		return nil, status.Error(codes.Internal, "identity service not configured")
 	}
-	identityIDs := make([]string, len(participants))
-	participantIDs := make(map[uuid.UUID]struct{}, len(participants))
-	for i, participant := range participants {
-		identityIDs[i] = participant.ID.String()
-		participantIDs[participant.ID] = struct{}{}
+	identityIDs := make([]string, len(ids))
+	requestedIDs := make(map[uuid.UUID]struct{}, len(ids))
+	for i, id := range ids {
+		identityIDs[i] = id.String()
+		requestedIDs[id] = struct{}{}
 	}
 	identityCtx, err := identityClientContext(ctx)
 	if err != nil {
@@ -253,24 +295,94 @@ func (s *Server) agentParticipantIDs(ctx context.Context, participants []store.P
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "batch get identity types: %v", err)
 	}
-	agentIDs := make([]uuid.UUID, 0)
+	typesByID := make(map[uuid.UUID]identityv1.IdentityType, len(ids))
 	for i, entry := range response.GetEntries() {
 		if entry == nil {
 			return nil, status.Errorf(codes.Internal, "identity type entry[%d]: missing", i)
-		}
-		if entry.GetIdentityType() != identityv1.IdentityType_IDENTITY_TYPE_AGENT {
-			continue
 		}
 		identityID, err := parseUUID(entry.GetIdentityId())
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: %v", i, err)
 		}
-		if _, ok := participantIDs[identityID]; !ok {
+		if _, ok := requestedIDs[identityID]; !ok {
 			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: unexpected identity", i)
 		}
-		agentIDs = append(agentIDs, identityID)
+		if _, ok := typesByID[identityID]; ok {
+			return nil, status.Errorf(codes.Internal, "identity type entry[%d].identity_id: duplicate identity", i)
+		}
+		typesByID[identityID] = entry.GetIdentityType()
 	}
-	return agentIDs, nil
+	if len(response.GetEntries()) != len(ids) {
+		return nil, status.Errorf(codes.Internal, "batch get identity types: expected %d entries, got %d", len(ids), len(response.GetEntries()))
+	}
+	for _, id := range ids {
+		if _, ok := typesByID[id]; !ok {
+			return nil, status.Errorf(codes.Internal, "batch get identity types: missing identity %s", id.String())
+		}
+	}
+	return typesByID, nil
+}
+
+func (s *Server) finalParticipantID(ctx context.Context, id uuid.UUID, identityType identityv1.IdentityType) (uuid.UUID, uuid.UUID, error) {
+	switch identityType {
+	case identityv1.IdentityType_IDENTITY_TYPE_AGENT:
+		instanceID, err := s.createAgentInstance(ctx, id)
+		if err != nil {
+			return uuid.UUID{}, uuid.UUID{}, err
+		}
+		return instanceID, id, nil
+	case identityv1.IdentityType_IDENTITY_TYPE_AGENT_INSTANCE:
+		classID, err := s.agentClassIDForInstance(ctx, id)
+		if err != nil {
+			return uuid.UUID{}, uuid.UUID{}, err
+		}
+		return id, classID, nil
+	case identityv1.IdentityType_IDENTITY_TYPE_UNSPECIFIED,
+		identityv1.IdentityType_IDENTITY_TYPE_USER,
+		identityv1.IdentityType_IDENTITY_TYPE_APP,
+		identityv1.IdentityType_IDENTITY_TYPE_RUNNER:
+		return id, uuid.Nil, nil
+	default:
+		return uuid.UUID{}, uuid.UUID{}, status.Errorf(codes.InvalidArgument, "unsupported identity type %s", identityType.String())
+	}
+}
+
+func (s *Server) createAgentInstance(ctx context.Context, agentID uuid.UUID) (uuid.UUID, error) {
+	if s.agents == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
+	}
+	response, err := s.agents.CreateInstance(ctx, &agentsv1.CreateInstanceRequest{AgentId: agentID.String()})
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "create agent instance: %v", err)
+	}
+	instance := response.GetInstance()
+	if instance == nil || instance.GetMeta() == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "create agent instance: instance missing")
+	}
+	instanceID, err := parseUUID(instance.GetMeta().GetId())
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "create agent instance id: %v", err)
+	}
+	return instanceID, nil
+}
+
+func (s *Server) agentClassIDForInstance(ctx context.Context, instanceID uuid.UUID) (uuid.UUID, error) {
+	if s.agents == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
+	}
+	response, err := s.agents.GetInstance(ctx, &agentsv1.GetInstanceRequest{Id: instanceID.String()})
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent instance: %v", err)
+	}
+	instance := response.GetInstance()
+	if instance == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "get agent instance: instance missing")
+	}
+	classID, err := parseUUID(instance.GetAgentId())
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent instance agent_id: %v", err)
+	}
+	return classID, nil
 }
 
 func (s *Server) ArchiveThread(ctx context.Context, req *threadsv1.ArchiveThreadRequest) (*threadsv1.ArchiveThreadResponse, error) {
@@ -329,6 +441,9 @@ func (s *Server) DegradeThread(ctx context.Context, req *threadsv1.DegradeThread
 }
 
 func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipantRequest) (*threadsv1.AddParticipantResponse, error) {
+	if req.GetPassive() {
+		return nil, status.Error(codes.InvalidArgument, "passive participants are not supported")
+	}
 	threadID, err := parseUUID(req.GetThreadId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
@@ -344,10 +459,15 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 	if err != nil {
 		return nil, err
 	}
-	if err := s.requireCanInitiateAgentParticipants(ctx, identityID, []store.ParticipantInput{{ID: participantID}}); err != nil {
+	finalParticipants, agentClassIDs, err := s.finalizeParticipants(ctx, []store.ParticipantInput{{ID: participantID, Passive: false}}, uuid.Nil, false)
+	if err != nil {
 		return nil, err
 	}
-	thread, err := s.store.AddParticipant(ctx, threadID, participantID, req.GetPassive())
+	if err := s.requireCanInitiateAgentClasses(ctx, identityID, agentClassIDs); err != nil {
+		return nil, err
+	}
+	participantID = finalParticipants[0].ID
+	thread, err := s.store.AddParticipant(ctx, threadID, participantID, false)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -397,15 +517,131 @@ func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequ
 		return nil, err
 	}
 
-	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs)
+	thread, err := s.store.GetThread(ctx, threadID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	messageRecipients, agentInstanceRecipients, err := s.deliveryRecipients(ctx, thread.Participants, senderID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.store.SendMessage(ctx, threadID, senderID, req.GetBody(), fileIDs, messageRecipients, agentInstanceRecipients)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 	s.recordMessageSent(ctx, result)
+	if len(result.AgentInboxDeliveries) > 0 {
+		err = s.DrainPendingAgentInboxDeliveries(ctx)
+	}
+	if err != nil {
+		log.Printf("agent inbox delivery: %v", err)
+	}
 	if err := s.notifier.PublishMessageCreated(ctx, threadID, result.Message.ID, result.Recipients); err != nil {
 		return nil, status.Errorf(codes.Internal, "notify recipients: %v", err)
 	}
 	return &threadsv1.SendMessageResponse{Message: toProtoMessage(result.Message)}, nil
+}
+
+func (s *Server) deliveryRecipients(ctx context.Context, participants []store.Participant, senderID uuid.UUID) ([]uuid.UUID, []uuid.UUID, error) {
+	recipientIDs := make([]uuid.UUID, 0, len(participants))
+	for _, participant := range participants {
+		if participant.ID == senderID {
+			continue
+		}
+		recipientIDs = append(recipientIDs, participant.ID)
+	}
+	if len(recipientIDs) == 0 {
+		return nil, nil, nil
+	}
+	typesByID, err := s.identityTypes(ctx, recipientIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	messageRecipients := make([]uuid.UUID, 0, len(recipientIDs))
+	agentInstanceRecipients := make([]uuid.UUID, 0, len(recipientIDs))
+	for _, recipientID := range recipientIDs {
+		switch typesByID[recipientID] {
+		case identityv1.IdentityType_IDENTITY_TYPE_AGENT_INSTANCE:
+			agentInstanceRecipients = append(agentInstanceRecipients, recipientID)
+		case identityv1.IdentityType_IDENTITY_TYPE_UNSPECIFIED,
+			identityv1.IdentityType_IDENTITY_TYPE_USER,
+			identityv1.IdentityType_IDENTITY_TYPE_APP,
+			identityv1.IdentityType_IDENTITY_TYPE_RUNNER:
+			messageRecipients = append(messageRecipients, recipientID)
+		case identityv1.IdentityType_IDENTITY_TYPE_AGENT:
+			return nil, nil, status.Errorf(codes.FailedPrecondition, "thread contains agent class participant %s", recipientID.String())
+		default:
+			return nil, nil, status.Errorf(codes.FailedPrecondition, "thread contains unsupported participant type %s", typesByID[recipientID].String())
+		}
+	}
+	return messageRecipients, agentInstanceRecipients, nil
+}
+
+func (s *Server) deliverAgentInboxDeliveries(ctx context.Context, deliveries []store.AgentInboxDelivery) error {
+	errs := make([]error, 0)
+	for _, delivery := range deliveries {
+		if err := s.deliverAgentInboxDelivery(ctx, delivery); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Server) deliverAgentInboxDelivery(ctx context.Context, delivery store.AgentInboxDelivery) error {
+	if s.agents == nil {
+		return status.Error(codes.Internal, "agents service not configured")
+	}
+	fileIDs := make([]string, len(delivery.FileIDs))
+	for i, fileID := range delivery.FileIDs {
+		fileIDs[i] = fileID.String()
+	}
+	_, err := s.agents.FanoutInboxItem(ctx, &agentsv1.FanoutInboxItemRequest{
+		AgentInstanceId: delivery.AgentInstanceID.String(),
+		ThreadId:        delivery.ThreadID.String(),
+		MessageId:       delivery.MessageID.String(),
+		SenderId:        delivery.SenderID.String(),
+		Body:            delivery.Body,
+		FileIds:         fileIDs,
+	})
+	if err != nil {
+		message := fmt.Sprintf("fanout inbox item: %v", err)
+		if markErr := s.store.MarkAgentInboxDeliveryFailed(ctx, delivery.MessageID, delivery.AgentInstanceID, delivery.ClaimID, message); markErr != nil {
+			return status.Errorf(codes.Internal, "%s; mark failed: %v", message, markErr)
+		}
+		return status.Error(codes.Internal, message)
+	}
+	if err := s.store.MarkAgentInboxDeliveryDelivered(ctx, delivery.MessageID, delivery.AgentInstanceID, delivery.ClaimID); err != nil {
+		return status.Errorf(codes.Internal, "mark agent inbox delivery delivered: %v", err)
+	}
+	return nil
+}
+
+func (s *Server) DrainPendingAgentInboxDeliveries(ctx context.Context) error {
+	deliveries, err := s.store.ClaimPendingAgentInboxDeliveries(ctx, agentInboxDeliveryLimit)
+	if err != nil {
+		return status.Errorf(codes.Internal, "list pending agent inbox deliveries: %v", err)
+	}
+	return s.deliverAgentInboxDeliveries(ctx, deliveries)
+}
+
+func (s *Server) StartAgentInboxDeliveryWorker(ctx context.Context) {
+	go func() {
+		if err := s.DrainPendingAgentInboxDeliveries(ctx); err != nil {
+			log.Printf("agent inbox delivery drain: %v", err)
+		}
+		ticker := time.NewTicker(agentInboxDeliveryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := s.DrainPendingAgentInboxDeliveries(ctx); err != nil {
+					log.Printf("agent inbox delivery drain: %v", err)
+				}
+			}
+		}
+	}()
 }
 
 func (s *Server) GetThreads(ctx context.Context, req *threadsv1.GetThreadsRequest) (*threadsv1.GetThreadsResponse, error) {
@@ -909,13 +1145,27 @@ func (s *Server) organizationIDFromIdentity(ctx context.Context, missingMessage 
 	if identityID == "" || identityType == "" {
 		return uuid.UUID{}, status.Error(codes.InvalidArgument, missingMessage)
 	}
-	if !strings.EqualFold(identityType, agentIdentityType) {
+	agentID := identityID
+	if strings.EqualFold(identityType, agentInstanceIdentityType) {
+		if s.agents == nil {
+			return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
+		}
+		response, err := s.agents.GetInstance(ctx, &agentsv1.GetInstanceRequest{Id: identityID})
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.Internal, "get agent instance: %v", err)
+		}
+		instance := response.GetInstance()
+		if instance == nil {
+			return uuid.UUID{}, status.Error(codes.Internal, "get agent instance: instance missing")
+		}
+		agentID = instance.GetAgentId()
+	} else if !strings.EqualFold(identityType, agentIdentityType) {
 		return uuid.UUID{}, status.Error(codes.InvalidArgument, missingMessage)
 	}
 	if s.agents == nil {
 		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
 	}
-	response, err := s.agents.GetAgent(ctx, &agentsv1.GetAgentRequest{Id: identityID})
+	response, err := s.agents.GetAgent(ctx, &agentsv1.GetAgentRequest{Id: agentID})
 	if err != nil {
 		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent: %v", err)
 	}
@@ -956,7 +1206,7 @@ func isAgentIdentity(ctx context.Context) bool {
 		return false
 	}
 	identityType := metadataValue(md, identityTypeMetadataKey)
-	return strings.EqualFold(identityType, agentIdentityType)
+	return strings.EqualFold(identityType, agentIdentityType) || strings.EqualFold(identityType, agentInstanceIdentityType)
 }
 
 func (s *Server) checkAllowed(ctx context.Context, identityID uuid.UUID, relation, object string) (bool, error) {
@@ -1219,7 +1469,11 @@ func (s *Server) batchResolveNicknames(ctx context.Context, organizationID uuid.
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "nickname entry[%d].identity_id: %v", i, err)
 		}
-		nicknames[identityID] = entry.GetNickname()
+		nickname := entry.GetNickname()
+		if suffix := entry.GetInstanceSuffix(); suffix != "" {
+			nickname += "#" + suffix
+		}
+		nicknames[identityID] = nickname
 	}
 	return nicknames, nil
 }
@@ -1243,8 +1497,7 @@ func initiatorInfoFromContext(ctx context.Context) (initiatorInfo, bool, error) 
 	if err != nil {
 		return initiatorInfo{}, false, status.Errorf(codes.InvalidArgument, "identity_id: %v", err)
 	}
-	passive := strings.EqualFold(identityType, agentIdentityType)
-	return initiatorInfo{ID: initiatorID, Passive: passive}, true, nil
+	return initiatorInfo{ID: initiatorID, Passive: false}, true, nil
 }
 
 func metadataValue(md metadata.MD, key string) string {

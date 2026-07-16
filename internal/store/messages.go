@@ -12,12 +12,13 @@ import (
 )
 
 type SendMessageResult struct {
-	Message        Message
-	OrganizationID uuid.UUID
-	Recipients     []uuid.UUID
+	Message              Message
+	OrganizationID       uuid.UUID
+	Recipients           []uuid.UUID
+	AgentInboxDeliveries []AgentInboxDelivery
 }
 
-func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (SendMessageResult, error) {
+func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, recipients []uuid.UUID, agentInstanceRecipients []uuid.UUID) (SendMessageResult, error) {
 	var result SendMessageResult
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
 		thread, err := loadThreadRow(ctx, tx, threadID, true)
@@ -40,18 +41,32 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		if _, err := tx.Exec(ctx, `INSERT INTO messages (id, thread_id, sender_id, body, file_ids, created_at) VALUES ($1, $2, $3, $4, $5, $6)`, messageID, threadID, senderID, body, fileIDArray, now); err != nil {
 			return err
 		}
-		recipients, err := loadRecipients(ctx, tx, threadID, senderID)
-		if err != nil {
-			return err
-		}
-		// Passive participants still receive message notifications; workload
-		// triggers are handled downstream.
 		if len(recipients) > 0 {
 			rows := make([][]any, len(recipients))
 			for i, recipientID := range recipients {
 				rows[i] = []any{messageID, threadID, recipientID}
 			}
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"message_recipients"}, []string{"message_id", "thread_id", "participant_id"}, pgx.CopyFromRows(rows)); err != nil {
+				return err
+			}
+		}
+		agentInboxDeliveries := make([]AgentInboxDelivery, len(agentInstanceRecipients))
+		if len(agentInstanceRecipients) > 0 {
+			rows := make([][]any, len(agentInstanceRecipients))
+			for i, agentInstanceID := range agentInstanceRecipients {
+				rows[i] = []any{messageID, agentInstanceID, threadID, senderID, body, fileIDArray, now, now}
+				agentInboxDeliveries[i] = AgentInboxDelivery{
+					MessageID:       messageID,
+					AgentInstanceID: agentInstanceID,
+					ThreadID:        threadID,
+					SenderID:        senderID,
+					Body:            body,
+					FileIDs:         fileIDs,
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}
+			}
+			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"agent_inbox_deliveries"}, []string{"message_id", "agent_instance_id", "thread_id", "sender_id", "body", "file_ids", "created_at", "updated_at"}, pgx.CopyFromRows(rows)); err != nil {
 				return err
 			}
 		}
@@ -67,8 +82,9 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 				FileIDs:   fileIDs,
 				CreatedAt: now,
 			},
-			OrganizationID: organizationID,
-			Recipients:     recipients,
+			OrganizationID:       organizationID,
+			Recipients:           recipients,
+			AgentInboxDeliveries: agentInboxDeliveries,
 		}
 		return nil
 	})
@@ -76,27 +92,6 @@ func (s *Store) SendMessage(ctx context.Context, threadID, senderID uuid.UUID, b
 		return SendMessageResult{}, err
 	}
 	return result, nil
-}
-
-func loadRecipients(ctx context.Context, q queryer, threadID, senderID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.Query(ctx, `SELECT participant_id FROM thread_participants WHERE thread_id = $1 AND participant_id <> $2 ORDER BY participant_id ASC`, threadID, senderID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	recipients := []uuid.UUID{}
-	for rows.Next() {
-		var recipientID uuid.UUID
-		if err := rows.Scan(&recipientID); err != nil {
-			return nil, err
-		}
-		recipients = append(recipients, recipientID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return recipients, nil
 }
 
 func (s *Store) ListMessages(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *MessageCursor, order MessageOrder) (MessageListResult, error) {

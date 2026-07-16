@@ -23,18 +23,21 @@ import (
 )
 
 type stubThreadStore struct {
-	t                *testing.T
-	createThreadFn   func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
-	archiveThreadFn  func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	degradeThreadFn  func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	addParticipantFn func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
-	sendMessageFn    func(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error)
-	getThreadFn      func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
-	listOrgThreadsFn func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
-	listMessagesFn   func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
-	listUnackedFn    func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
-	unackedCountsFn  func(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
-	ackMessagesFn    func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
+	t                                  *testing.T
+	createThreadFn                     func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
+	archiveThreadFn                    func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	degradeThreadFn                    func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	addParticipantFn                   func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
+	sendMessageFn                      func(ctx context.Context, threadID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error)
+	claimPendingAgentInboxDeliveriesFn func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
+	markAgentInboxDeliveryDeliveredFn  func(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error
+	markAgentInboxDeliveryFailedFn     func(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error
+	getThreadFn                        func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
+	listOrgThreadsFn                   func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
+	listMessagesFn                     func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
+	listUnackedFn                      func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
+	unackedCountsFn                    func(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
+	ackMessagesFn                      func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
 }
 
 func (s *stubThreadStore) unexpectedCall(method string) {
@@ -74,12 +77,36 @@ func (s *stubThreadStore) AddParticipant(ctx context.Context, threadID, particip
 	return s.addParticipantFn(ctx, threadID, participantID, passive)
 }
 
-func (s *stubThreadStore) SendMessage(ctx context.Context, threadID uuid.UUID, senderID uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+func (s *stubThreadStore) SendMessage(ctx context.Context, threadID uuid.UUID, senderID uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
 	if s.sendMessageFn == nil {
 		s.unexpectedCall("SendMessage")
 		return store.SendMessageResult{}, nil
 	}
-	return s.sendMessageFn(ctx, threadID, senderID, body, fileIDs)
+	return s.sendMessageFn(ctx, threadID, senderID, body, fileIDs, messageRecipientIDs, agentInstanceRecipientIDs)
+}
+
+func (s *stubThreadStore) ClaimPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+	s.t.Helper()
+	if s.claimPendingAgentInboxDeliveriesFn == nil {
+		return nil, nil
+	}
+	return s.claimPendingAgentInboxDeliveriesFn(ctx, limit)
+}
+
+func (s *stubThreadStore) MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error {
+	s.t.Helper()
+	if s.markAgentInboxDeliveryDeliveredFn == nil {
+		return nil
+	}
+	return s.markAgentInboxDeliveryDeliveredFn(ctx, messageID, agentInstanceID, claimID)
+}
+
+func (s *stubThreadStore) MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error {
+	s.t.Helper()
+	if s.markAgentInboxDeliveryFailedFn == nil {
+		return nil
+	}
+	return s.markAgentInboxDeliveryFailedFn(ctx, messageID, agentInstanceID, claimID, deliveryError)
 }
 
 func (s *stubThreadStore) GetThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error) {
@@ -171,8 +198,11 @@ func (s *stubIdentityResolver) BatchGetIdentityTypes(ctx context.Context, req *i
 }
 
 type stubAgentsService struct {
-	t          *testing.T
-	getAgentFn func(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error)
+	t             *testing.T
+	getAgentFn    func(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error)
+	createFn      func(ctx context.Context, req *agentsv1.CreateInstanceRequest, opts ...grpc.CallOption) (*agentsv1.CreateInstanceResponse, error)
+	getInstanceFn func(ctx context.Context, req *agentsv1.GetInstanceRequest, opts ...grpc.CallOption) (*agentsv1.GetInstanceResponse, error)
+	fanoutFn      func(ctx context.Context, req *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error)
 }
 
 func (s *stubAgentsService) GetAgent(ctx context.Context, req *agentsv1.GetAgentRequest, opts ...grpc.CallOption) (*agentsv1.GetAgentResponse, error) {
@@ -181,6 +211,30 @@ func (s *stubAgentsService) GetAgent(ctx context.Context, req *agentsv1.GetAgent
 		s.t.Fatalf("unexpected GetAgent call")
 	}
 	return s.getAgentFn(ctx, req, opts...)
+}
+
+func (s *stubAgentsService) CreateInstance(ctx context.Context, req *agentsv1.CreateInstanceRequest, opts ...grpc.CallOption) (*agentsv1.CreateInstanceResponse, error) {
+	s.t.Helper()
+	if s.createFn == nil {
+		s.t.Fatalf("unexpected CreateInstance call")
+	}
+	return s.createFn(ctx, req, opts...)
+}
+
+func (s *stubAgentsService) GetInstance(ctx context.Context, req *agentsv1.GetInstanceRequest, opts ...grpc.CallOption) (*agentsv1.GetInstanceResponse, error) {
+	s.t.Helper()
+	if s.getInstanceFn == nil {
+		s.t.Fatalf("unexpected GetInstance call")
+	}
+	return s.getInstanceFn(ctx, req, opts...)
+}
+
+func (s *stubAgentsService) FanoutInboxItem(ctx context.Context, req *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error) {
+	s.t.Helper()
+	if s.fanoutFn == nil {
+		s.t.Fatalf("unexpected FanoutInboxItem call")
+	}
+	return s.fanoutFn(ctx, req, opts...)
 }
 
 type stubAuthorizationService struct {
@@ -359,8 +413,8 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 			if participants[0].ID != agentID {
 				t.Fatalf("expected initiator %s first, got %s", agentID, participants[0].ID)
 			}
-			if !participants[0].Passive {
-				t.Fatalf("expected agent passive true")
+			if participants[0].Passive {
+				t.Fatalf("expected agent passive false")
 			}
 			if participants[1].ID != participantID {
 				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
@@ -376,7 +430,7 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 				CreatedAt:      now,
 				UpdatedAt:      now,
 				Participants: []store.Participant{
-					{ID: agentID, JoinedAt: now, Passive: true},
+					{ID: agentID, JoinedAt: now, Passive: false},
 					{ID: participantID, JoinedAt: now, Passive: false},
 				},
 			}, nil
@@ -404,8 +458,8 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 	if agentParticipant == nil {
 		t.Fatal("expected agent participant in response")
 	}
-	if !agentParticipant.GetPassive() {
-		t.Fatal("expected agent participant passive true")
+	if agentParticipant.GetPassive() {
+		t.Fatal("expected agent participant passive false")
 	}
 }
 
@@ -429,8 +483,8 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 			if participants[0].ID != agentID {
 				t.Fatalf("expected initiator %s, got %s", agentID, participants[0].ID)
 			}
-			if !participants[0].Passive {
-				t.Fatalf("expected initiator passive true")
+			if participants[0].Passive {
+				t.Fatalf("expected initiator passive false")
 			}
 			return store.Thread{
 				ID:             threadID,
@@ -440,7 +494,7 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 				CreatedAt:      now,
 				UpdatedAt:      now,
 				Participants: []store.Participant{
-					{ID: agentID, JoinedAt: now, Passive: true},
+					{ID: agentID, JoinedAt: now, Passive: false},
 				},
 			}, nil
 		},
@@ -463,8 +517,8 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 	if agentParticipant == nil {
 		t.Fatal("expected agent participant in response")
 	}
-	if !agentParticipant.GetPassive() {
-		t.Fatal("expected agent participant passive true")
+	if agentParticipant.GetPassive() {
+		t.Fatal("expected agent participant passive false")
 	}
 }
 
@@ -708,8 +762,8 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 			if participants[0].ID != agentID {
 				t.Fatalf("expected initiator %s first, got %s", agentID, participants[0].ID)
 			}
-			if !participants[0].Passive {
-				t.Fatalf("expected initiator passive true")
+			if participants[0].Passive {
+				t.Fatalf("expected initiator passive false")
 			}
 			if participants[1].ID != participantID {
 				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
@@ -722,7 +776,7 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 				CreatedAt:      now,
 				UpdatedAt:      now,
 				Participants: []store.Participant{
-					{ID: agentID, JoinedAt: now, Passive: true},
+					{ID: agentID, JoinedAt: now, Passive: false},
 					{ID: participantID, JoinedAt: now, Passive: false},
 				},
 			}, nil
@@ -964,8 +1018,8 @@ func assertCreateThreadDedupesInitiator(t *testing.T, initiatorID, participantID
 			if participants[0].ID != initiatorID {
 				t.Fatalf("expected initiator %s first, got %s", initiatorID, participants[0].ID)
 			}
-			if !participants[0].Passive {
-				t.Fatal("expected agent initiator to be passive")
+			if participants[0].Passive {
+				t.Fatal("expected agent initiator to be active")
 			}
 			if participants[1].ID != participantID {
 				t.Fatalf("expected participant %s second, got %s", participantID, participants[1].ID)
@@ -978,7 +1032,7 @@ func assertCreateThreadDedupesInitiator(t *testing.T, initiatorID, participantID
 				CreatedAt:      now,
 				UpdatedAt:      now,
 				Participants: []store.Participant{
-					{ID: initiatorID, JoinedAt: now, Passive: true},
+					{ID: initiatorID, JoinedAt: now, Passive: false},
 					{ID: participantID, JoinedAt: now, Passive: false},
 				},
 			}, nil
@@ -1142,79 +1196,23 @@ func TestCreateThreadWritesAuthorizationTuples(t *testing.T) {
 	}
 }
 
-func TestAddParticipantWithNicknamePassesPassive(t *testing.T) {
+func TestAddParticipantRejectsPassive(t *testing.T) {
 	threadID := uuid.New()
-	organizationID := uuid.New()
 	participantID := uuid.New()
-	now := time.Now().UTC()
-	storeCalled := false
-	identityCalled := false
-
-	storeStub := &stubThreadStore{
-		t: t,
-		addParticipantFn: func(ctx context.Context, threadArg, participantArg uuid.UUID, passive bool) (store.Thread, error) {
-			storeCalled = true
-			if threadArg != threadID {
-				t.Fatalf("expected thread ID %s, got %s", threadID, threadArg)
-			}
-			if participantArg != participantID {
-				t.Fatalf("expected participant ID %s, got %s", participantID, participantArg)
-			}
-			if !passive {
-				t.Fatalf("expected passive true, got %v", passive)
-			}
-			return store.Thread{
-				ID:        threadID,
-				Status:    store.ThreadStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
-				Participants: []store.Participant{
-					{ID: participantID, JoinedAt: now, Passive: true},
-				},
-			}, nil
-		},
-	}
-	identityStub := &stubIdentityResolver{
-		t: t,
-		resolveFn: func(ctx context.Context, req *identityv1.ResolveNicknameRequest, opts ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
-			identityCalled = true
-			if req.GetOrganizationId() != organizationID.String() {
-				t.Fatalf("expected organization ID %s, got %s", organizationID, req.GetOrganizationId())
-			}
-			if req.GetNickname() != "agent-alpha" {
-				t.Fatalf("expected nickname agent-alpha, got %s", req.GetNickname())
-			}
-			return &identityv1.ResolveNicknameResponse{IdentityId: participantID.String()}, nil
-		},
-	}
-
 	identityID := uuid.New()
-	authStub := allowAuthStub(t)
-	srv := New(storeStub, nil, authStub, identityStub, nil, nil)
-	orgIDValue := organizationID.String()
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-organization-id", organizationID.String(), "x-identity-id", identityID.String()))
-	resp, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{
-		ThreadId:       threadID.String(),
-		OrganizationId: &orgIDValue,
-		Passive:        true,
-		Participant: &threadsv1.ParticipantIdentifier{
-			Identifier: &threadsv1.ParticipantIdentifier_ParticipantNickname{ParticipantNickname: "@agent-alpha"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("AddParticipant returned error: %v", err)
+
+	srv := New(&stubThreadStore{t: t}, nil, allowAuthStub(t), nil, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String()))
+	_, err := srv.AddParticipant(ctx, &threadsv1.AddParticipantRequest{ThreadId: threadID.String(), ParticipantId: participantID.String(), Passive: true})
+	if err == nil {
+		t.Fatal("expected error")
 	}
-	if !storeCalled {
-		t.Fatal("expected AddParticipant to be called")
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
 	}
-	if !identityCalled {
-		t.Fatal("expected ResolveNickname to be called")
-	}
-	if resp.GetThread() == nil || len(resp.GetThread().GetParticipants()) != 1 {
-		t.Fatalf("expected 1 participant, got %v", resp.GetThread().GetParticipants())
-	}
-	if !resp.GetThread().GetParticipants()[0].GetPassive() {
-		t.Fatal("expected passive participant to be true")
+	if st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %s: %s", st.Code(), st.Message())
 	}
 }
 
@@ -1817,7 +1815,7 @@ func TestSendMessageAuthorizationDenied(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
 			storeCalled = true
 			return store.SendMessageResult{}, nil
 		},
@@ -1875,7 +1873,13 @@ func TestSendMessageRecordsUsageWithThreadOrganization(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			if id != threadID {
+				t.Fatalf("expected thread %s, got %s", threadID, id)
+			}
+			return store.Thread{ID: threadID, OrganizationID: &organizationID, Participants: []store.Participant{{ID: identityID, JoinedAt: now, Passive: false}}}, nil
+		},
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
 			if threadArg != threadID {
 				t.Fatalf("expected thread %s, got %s", threadID, threadArg)
 			}
@@ -1933,7 +1937,10 @@ func TestSendMessageRejectsThreadWithoutOrganization(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			return store.Thread{ID: threadID, Participants: []store.Participant{{ID: identityID}}}, nil
+		},
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
 			return store.SendMessageResult{}, store.ErrThreadOrganizationMissing
 		},
 	}
@@ -1965,7 +1972,7 @@ func TestSendMessageRejectsSenderMismatch(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
 			storeCalled = true
 			return store.SendMessageResult{}, nil
 		},
@@ -2010,7 +2017,10 @@ func TestSendMessageRejectsDegradedThread(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID) (store.SendMessageResult, error) {
+		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			return store.Thread{ID: threadID, Participants: []store.Participant{{ID: identityID}}}, nil
+		},
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
 			storeCalled = true
 			if threadArg != threadID {
 				t.Fatalf("expected thread id %s, got %s", threadID, threadArg)
@@ -2838,4 +2848,306 @@ func organizationThreadFiltersEqual(left, right store.OrganizationThreadFilter) 
 		return false
 	}
 	return true
+}
+
+func TestCreateThreadStoresAgentInstanceForAgentClassParticipant(t *testing.T) {
+	threadID := uuid.New()
+	organizationID := uuid.New()
+	identityID := uuid.New()
+	agentID := uuid.New()
+	instanceID := uuid.New()
+	now := time.Now().UTC()
+
+	storeStub := &stubThreadStore{
+		t: t,
+		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+			if orgID != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
+			}
+			if len(participants) != 2 {
+				t.Fatalf("expected 2 participants, got %d", len(participants))
+			}
+			if participants[1].ID != instanceID {
+				t.Fatalf("expected stored agent instance %s, got %s", instanceID, participants[1].ID)
+			}
+			return store.Thread{
+				ID:             threadID,
+				OrganizationID: &organizationID,
+				Status:         store.ThreadStatusActive,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+				Participants: []store.Participant{
+					{ID: identityID, JoinedAt: now},
+					{ID: instanceID, JoinedAt: now},
+				},
+			}, nil
+		},
+	}
+	identityStub := &stubIdentityResolver{
+		t: t,
+		typeBatchFn: func(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error) {
+			entries := make([]*identityv1.IdentityTypeEntry, len(req.GetIdentityIds()))
+			for i, id := range req.GetIdentityIds() {
+				identityType := identityv1.IdentityType_IDENTITY_TYPE_USER
+				if id == agentID.String() {
+					identityType = identityv1.IdentityType_IDENTITY_TYPE_AGENT
+				}
+				entries[i] = &identityv1.IdentityTypeEntry{IdentityId: id, IdentityType: identityType}
+			}
+			return &identityv1.BatchGetIdentityTypesResponse{Entries: entries}, nil
+		},
+	}
+	agentsStub := &stubAgentsService{
+		t: t,
+		createFn: func(ctx context.Context, req *agentsv1.CreateInstanceRequest, opts ...grpc.CallOption) (*agentsv1.CreateInstanceResponse, error) {
+			if req.GetAgentId() != agentID.String() {
+				t.Fatalf("expected agent id %s, got %s", agentID, req.GetAgentId())
+			}
+			return &agentsv1.CreateInstanceResponse{Instance: &agentsv1.AgentInstance{Meta: &agentsv1.EntityMeta{Id: instanceID.String()}, AgentId: agentID.String()}}, nil
+		},
+	}
+	authStub := &stubAuthorizationService{
+		t: t,
+		checkFn: func(ctx context.Context, req *authorizationv1.CheckRequest, opts ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+			if req.GetTupleKey().GetRelation() == "can_initiate" && req.GetTupleKey().GetObject() != "agent:"+agentID.String() {
+				t.Fatalf("expected can_initiate on agent %s, got %s", agentID, req.GetTupleKey().GetObject())
+			}
+			return &authorizationv1.CheckResponse{Allowed: true}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, authStub, identityStub, agentsStub, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", identityID.String(), "x-identity-type", "user", "x-organization-id", organizationID.String()))
+	_, err := srv.CreateThread(ctx, &threadsv1.CreateThreadRequest{Participants: []*threadsv1.ParticipantIdentifier{{Identifier: &threadsv1.ParticipantIdentifier_ParticipantId{ParticipantId: agentID.String()}}}})
+	if err != nil {
+		t.Fatalf("CreateThread returned error: %v", err)
+	}
+}
+
+func TestSendMessageFansOutAgentInstancesOnly(t *testing.T) {
+	threadID := uuid.New()
+	messageID := uuid.New()
+	organizationID := uuid.New()
+	senderID := uuid.New()
+	userRecipientID := uuid.New()
+	agentInstanceID := uuid.New()
+	claimID := uuid.New()
+	now := time.Now().UTC()
+	var fanoutCalled bool
+	var deliveredMarked bool
+
+	storeStub := &stubThreadStore{
+		t: t,
+		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+			if limit != agentInboxDeliveryLimit {
+				t.Fatalf("expected limit %d, got %d", agentInboxDeliveryLimit, limit)
+			}
+			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "claimed", FileIDs: []uuid.UUID{}, ClaimID: claimID}}, nil
+		},
+		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID) error {
+			deliveredMarked = true
+			if messageArg != messageID || agentInstanceArg != agentInstanceID || claimArg != claimID {
+				t.Fatalf("unexpected delivered mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			return nil
+		},
+		getThreadFn: func(ctx context.Context, id uuid.UUID) (store.Thread, error) {
+			return store.Thread{ID: threadID, OrganizationID: &organizationID, Participants: []store.Participant{{ID: senderID}, {ID: userRecipientID}, {ID: agentInstanceID}}}, nil
+		},
+		sendMessageFn: func(ctx context.Context, threadArg, senderArg uuid.UUID, body string, fileIDs []uuid.UUID, messageRecipientIDs []uuid.UUID, agentInstanceRecipientIDs []uuid.UUID) (store.SendMessageResult, error) {
+			if !reflect.DeepEqual(messageRecipientIDs, []uuid.UUID{userRecipientID}) {
+				t.Fatalf("expected user/app message recipients only, got %v", messageRecipientIDs)
+			}
+			if !reflect.DeepEqual(agentInstanceRecipientIDs, []uuid.UUID{agentInstanceID}) {
+				t.Fatalf("expected agent instance recipients, got %v", agentInstanceRecipientIDs)
+			}
+			return store.SendMessageResult{Message: store.Message{ID: messageID, ThreadID: threadID, SenderID: senderID, Body: body, FileIDs: fileIDs, CreatedAt: now}, OrganizationID: organizationID, Recipients: messageRecipientIDs, AgentInboxDeliveries: []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, Body: "unclaimed", FileIDs: fileIDs}}}, nil
+		},
+	}
+	identityStub := &stubIdentityResolver{
+		t: t,
+		typeBatchFn: func(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error) {
+			entries := make([]*identityv1.IdentityTypeEntry, len(req.GetIdentityIds()))
+			for i, id := range req.GetIdentityIds() {
+				identityType := identityv1.IdentityType_IDENTITY_TYPE_USER
+				if id == agentInstanceID.String() {
+					identityType = identityv1.IdentityType_IDENTITY_TYPE_AGENT_INSTANCE
+				}
+				entries[i] = &identityv1.IdentityTypeEntry{IdentityId: id, IdentityType: identityType}
+			}
+			return &identityv1.BatchGetIdentityTypesResponse{Entries: entries}, nil
+		},
+	}
+	agentsStub := &stubAgentsService{
+		t: t,
+		fanoutFn: func(ctx context.Context, req *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error) {
+			fanoutCalled = true
+			if req.GetAgentInstanceId() != agentInstanceID.String() || req.GetThreadId() != threadID.String() || req.GetMessageId() != messageID.String() || req.GetSenderId() != senderID.String() {
+				t.Fatalf("unexpected fanout request: %+v", req)
+			}
+			if req.GetBody() != "claimed" {
+				t.Fatalf("expected claimed outbox row body, got %q", req.GetBody())
+			}
+			return &agentsv1.FanoutInboxItemResponse{}, nil
+		},
+	}
+	notifierStub := &stubNotifier{t: t, publishFn: func(ctx context.Context, threadArg, messageArg uuid.UUID, recipients []uuid.UUID) error {
+		if !reflect.DeepEqual(recipients, []uuid.UUID{userRecipientID}) {
+			t.Fatalf("expected user notification recipients only, got %v", recipients)
+		}
+		return nil
+	}}
+
+	srv := New(storeStub, notifierStub, allowAuthStub(t), identityStub, agentsStub, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", senderID.String()))
+	_, err := srv.SendMessage(ctx, &threadsv1.SendMessageRequest{ThreadId: threadID.String(), Body: "hi"})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if !fanoutCalled {
+		t.Fatal("expected agent instance fanout")
+	}
+	if !deliveredMarked {
+		t.Fatal("expected claimed delivery to be marked delivered")
+	}
+}
+
+func TestIdentityTypesRequiresCompleteResponse(t *testing.T) {
+	firstID := uuid.New()
+	secondID := uuid.New()
+	callerID := uuid.New()
+	identityStub := &stubIdentityResolver{
+		t: t,
+		typeBatchFn: func(ctx context.Context, req *identityv1.BatchGetIdentityTypesRequest, opts ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error) {
+			return &identityv1.BatchGetIdentityTypesResponse{Entries: []*identityv1.IdentityTypeEntry{{IdentityId: firstID.String(), IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER}}}, nil
+		},
+	}
+
+	srv := New(&stubThreadStore{t: t}, nil, nil, identityStub, nil, nil)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", callerID.String()))
+	_, err := srv.identityTypes(ctx, []uuid.UUID{firstID, secondID})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %v", err)
+	}
+	if st.Code() != codes.Internal {
+		t.Fatalf("expected Internal, got %s: %s", st.Code(), st.Message())
+	}
+}
+
+func TestDrainPendingAgentInboxDeliveriesMarksDelivered(t *testing.T) {
+	messageID := uuid.New()
+	threadID := uuid.New()
+	senderID := uuid.New()
+	agentInstanceID := uuid.New()
+	claimID := uuid.New()
+	var marked bool
+	storeStub := &stubThreadStore{
+		t: t,
+		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+			if limit != agentInboxDeliveryLimit {
+				t.Fatalf("expected limit %d, got %d", agentInboxDeliveryLimit, limit)
+			}
+			return []store.AgentInboxDelivery{{MessageID: messageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: agentInstanceID, ClaimID: claimID, Body: "hi"}}, nil
+		},
+		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID) error {
+			marked = true
+			if messageArg != messageID || agentInstanceArg != agentInstanceID || claimArg != claimID {
+				t.Fatalf("unexpected delivered mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			return nil
+		},
+	}
+	agentsStub := &stubAgentsService{
+		t: t,
+		fanoutFn: func(ctx context.Context, req *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error) {
+			if req.GetMessageId() != messageID.String() || req.GetAgentInstanceId() != agentInstanceID.String() {
+				t.Fatalf("unexpected fanout request: %+v", req)
+			}
+			return &agentsv1.FanoutInboxItemResponse{}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, agentsStub, nil)
+	if err := srv.DrainPendingAgentInboxDeliveries(context.Background()); err != nil {
+		t.Fatalf("DrainPendingAgentInboxDeliveries returned error: %v", err)
+	}
+	if !marked {
+		t.Fatal("expected delivered mark")
+	}
+}
+
+func TestDrainPendingAgentInboxDeliveriesContinuesAfterFailure(t *testing.T) {
+	failedMessageID := uuid.New()
+	succeededMessageID := uuid.New()
+	threadID := uuid.New()
+	senderID := uuid.New()
+	failedAgentInstanceID := uuid.New()
+	succeededAgentInstanceID := uuid.New()
+	failedClaimID := uuid.New()
+	succeededClaimID := uuid.New()
+	fanoutCalls := make([]uuid.UUID, 0, 2)
+	failedMarked := false
+	deliveredMarked := false
+	storeStub := &stubThreadStore{
+		t: t,
+		claimPendingAgentInboxDeliveriesFn: func(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error) {
+			return []store.AgentInboxDelivery{
+				{MessageID: failedMessageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: failedAgentInstanceID, ClaimID: failedClaimID, Body: "first"},
+				{MessageID: succeededMessageID, ThreadID: threadID, SenderID: senderID, AgentInstanceID: succeededAgentInstanceID, ClaimID: succeededClaimID, Body: "second"},
+			}, nil
+		},
+		markAgentInboxDeliveryFailedFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID, deliveryError string) error {
+			failedMarked = true
+			if messageArg != failedMessageID || agentInstanceArg != failedAgentInstanceID || claimArg != failedClaimID {
+				t.Fatalf("unexpected failed mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			if deliveryError == "" {
+				t.Fatal("expected delivery error")
+			}
+			return nil
+		},
+		markAgentInboxDeliveryDeliveredFn: func(ctx context.Context, messageArg, agentInstanceArg, claimArg uuid.UUID) error {
+			deliveredMarked = true
+			if messageArg != succeededMessageID || agentInstanceArg != succeededAgentInstanceID || claimArg != succeededClaimID {
+				t.Fatalf("unexpected delivered mark: %s %s %s", messageArg, agentInstanceArg, claimArg)
+			}
+			return nil
+		},
+	}
+	agentsStub := &stubAgentsService{
+		t: t,
+		fanoutFn: func(ctx context.Context, req *agentsv1.FanoutInboxItemRequest, opts ...grpc.CallOption) (*agentsv1.FanoutInboxItemResponse, error) {
+			messageID, err := uuid.Parse(req.GetMessageId())
+			if err != nil {
+				t.Fatalf("parse message id: %v", err)
+			}
+			fanoutCalls = append(fanoutCalls, messageID)
+			if messageID == failedMessageID {
+				return nil, status.Error(codes.Unavailable, "agents unavailable")
+			}
+			return &agentsv1.FanoutInboxItemResponse{}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, nil, nil, agentsStub, nil)
+	err := srv.DrainPendingAgentInboxDeliveries(context.Background())
+	if err == nil {
+		t.Fatal("expected drain error")
+	}
+	if len(fanoutCalls) != 2 {
+		t.Fatalf("expected 2 fanout calls, got %d", len(fanoutCalls))
+	}
+	if fanoutCalls[0] != failedMessageID || fanoutCalls[1] != succeededMessageID {
+		t.Fatalf("unexpected fanout order: %v", fanoutCalls)
+	}
+	if !failedMarked {
+		t.Fatal("expected failed mark")
+	}
+	if !deliveredMarked {
+		t.Fatal("expected delivered mark after failure")
+	}
 }
