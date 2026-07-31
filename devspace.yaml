@@ -66,10 +66,22 @@ functions:
                 - -c
                 - |
                   set -eu
+                  # devspace only starts syncing once the pod is up, and waits
+                  # for it to be ready first -- so exiting here restarts the
+                  # container and the sync never lands. Wait for the whole set
+                  # generation needs, not just go.mod, or buf runs on a half
+                  # synced tree.
                   elapsed=0
-                  while [ ! -f /opt/app/data/go.mod ]; do
+                  until [ -f /opt/app/data/go.mod ] \
+                    && [ -f /opt/app/data/go.sum ] \
+                    && [ -f /opt/app/data/buf.gen.yaml ] \
+                    && [ -f /opt/app/data/buf.yaml ]; do
                     sleep 1; elapsed=$((elapsed + 1))
-                    [ "$elapsed" -ge 120 ] && { echo "ERROR: sync timeout" >&2; exit 1; }
+                    if [ "$elapsed" -ge 600 ]; then
+                      echo "ERROR: sync timeout waiting for source files" >&2
+                      ls -la /opt/app/data >&2 || true
+                      exit 1
+                    fi
                   done
                   buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1 --path agynio/api/identity/v1 --path agynio/api/metering/v1 --path agynio/api/authorization/v1 --path agynio/api/agents/v1
                   exec go run ./cmd/threads
