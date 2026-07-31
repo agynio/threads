@@ -160,9 +160,10 @@ hooks:
 dev:
   threads:
     namespace: ${THREADS_NAMESPACE}
+    # Name only: the instance label is the Helm release, which is threads for a
+    # standalone install and agyn-platform under the umbrella chart.
     labelSelector:
       app.kubernetes.io/name: threads
-      app.kubernetes.io/instance: threads
     containers:
       threads:
         container: threads
