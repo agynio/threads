@@ -25,9 +25,16 @@ functions:
     else
       echo "WARNING: ArgoCD Application 'threads' not found in argocd namespace."
     fi
+  threads_deployment: |-
+    # The release name varies by install: the umbrella chart names it
+    # threads-threads, a standalone install just threads. Resolve it by label
+    # rather than guessing.
+    kubectl get deployment -n ${THREADS_NAMESPACE} \
+      -l app.kubernetes.io/name=threads \
+      -o jsonpath='{.items[0].metadata.name}'
   patch_deployment: |-
     echo "Patching threads deployment for DevSpace..."
-    kubectl patch deployment threads-threads -n ${THREADS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
+    kubectl patch deployment "$(threads_deployment)" -n ${THREADS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
     spec:
       template:
         spec:
@@ -94,8 +101,8 @@ deployments:
           app.kubernetes.io/name: threads-e2e
 
 commands:
-  test:e2e: |-
-    devspace run-pipeline test:e2e $@
+  test-e2e: |-
+    devspace run-pipeline test-e2e $@
 
 pipelines:
   dev:
@@ -127,7 +134,7 @@ pipelines:
         stop_dev threads
       fi
 
-  test:e2e:
+  test-e2e:
     run: |-
       create_deployments e2e-runner
       start_dev e2e-runner &
