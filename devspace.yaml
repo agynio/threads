@@ -49,18 +49,15 @@ functions:
             - name: threads
               image: ghcr.io/agynio/devcontainer-go:1 # keep in sync with E2E_IMAGE
               workingDir: /opt/app/data
-              # The dev container generates and compiles before it listens,
-              # which takes minutes. Liveness would restart it mid-build, so it
-              # goes; readiness stays -- without it the pod reports Ready while
-              # nothing is on the port and callers get connection refused -- but
-              # with a threshold long enough to cover a cold build.
+              # All three go. The container generates and compiles before it
+              # listens, so liveness would restart it mid-build -- and devspace
+              # will not start syncing until the pod is ready, so a readiness
+              # probe on the port deadlocks: no source, so no listener, so never
+              # ready, so no sync. The dev pipeline waits on port 50051 itself
+              # once the sync is through.
               livenessProbe: null
               startupProbe: null
-              readinessProbe:
-                tcpSocket:
-                  port: 50051
-                periodSeconds: 10
-                failureThreshold: 120
+              readinessProbe: null
               command:
                 - sh
                 - -c
