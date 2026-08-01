@@ -24,7 +24,7 @@ import (
 
 type stubThreadStore struct {
 	t                                  *testing.T
-	createThreadFn                     func(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
+	createThreadFn                     func(ctx context.Context, threadID uuid.UUID, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
 	archiveThreadFn                    func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	degradeThreadFn                    func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	addParticipantFn                   func(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
@@ -45,12 +45,12 @@ func (s *stubThreadStore) unexpectedCall(method string) {
 	s.t.Fatalf("unexpected %s call", method)
 }
 
-func (s *stubThreadStore) CreateThread(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+func (s *stubThreadStore) CreateThread(ctx context.Context, threadID uuid.UUID, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 	s.t.Helper()
 	if s.createThreadFn == nil {
 		s.t.Fatalf("unexpected CreateThread call")
 	}
-	return s.createThreadFn(ctx, organizationID, participants)
+	return s.createThreadFn(ctx, threadID, organizationID, participants)
 }
 
 func (s *stubThreadStore) ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error) {
@@ -314,7 +314,7 @@ func TestCreateThreadRecordsUsageWithCreatedThreadOrganization(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
 			}
@@ -402,7 +402,7 @@ func TestCreateThreadAgentInitiatorPassive(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -472,7 +472,7 @@ func TestCreateThreadEmptyParticipantsWithAgentInitiator(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -532,7 +532,7 @@ func TestCreateThreadUserInitiatorActive(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -596,7 +596,7 @@ func TestCreateThreadMissingIdentityMetadataRejected(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			return store.Thread{}, nil
 		},
@@ -661,7 +661,7 @@ func TestCreateThreadNicknameUsesOrganizationID(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -751,7 +751,7 @@ func TestCreateThreadNicknameUsesOrganizationIDFromAgentIdentity(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -842,7 +842,7 @@ func TestCreateThreadMixedParticipantIdentifiers(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -1007,7 +1007,7 @@ func assertCreateThreadDedupesInitiator(t *testing.T, initiatorID, participantID
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -1062,7 +1062,7 @@ func TestCreateThreadAuthorizationDenied(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			return store.Thread{}, nil
 		},
@@ -1125,7 +1125,7 @@ func TestCreateThreadWritesAuthorizationTuples(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			storeCalled = true
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
@@ -2860,7 +2860,7 @@ func TestCreateThreadStoresAgentInstanceForAgentClassParticipant(t *testing.T) {
 
 	storeStub := &stubThreadStore{
 		t: t,
-		createThreadFn: func(ctx context.Context, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
+		createThreadFn: func(ctx context.Context, _ uuid.UUID, orgID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error) {
 			if orgID != organizationID {
 				t.Fatalf("expected organization %s, got %s", organizationID, orgID)
 			}

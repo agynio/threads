@@ -47,7 +47,7 @@ const (
 )
 
 type threadStore interface {
-	CreateThread(ctx context.Context, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
+	CreateThread(ctx context.Context, threadID uuid.UUID, organizationID uuid.UUID, participants []store.ParticipantInput) (store.Thread, error)
 	ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	DegradeThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	AddParticipant(ctx context.Context, threadID, participantID uuid.UUID, passive bool) (store.Thread, error)
@@ -184,7 +184,11 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 		participants = append(participants, store.ParticipantInput{ID: initiator.ID, Passive: false})
 	}
 	participants = append(participants, resolved...)
-	finalParticipants, agentClassIDs, err := s.finalizeParticipants(ctx, participants, initiator.ID, hasInitiator)
+	// The id is settled here rather than in the store: creating an agent
+	// instance names the thread that is adding it, and that has to be the id
+	// the thread ends up with.
+	threadID := uuid.New()
+	finalParticipants, agentClassIDs, err := s.finalizeParticipants(ctx, participants, initiator.ID, hasInitiator, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +197,7 @@ func (s *Server) CreateThread(ctx context.Context, req *threadsv1.CreateThreadRe
 		return nil, err
 	}
 
-	thread, err := s.store.CreateThread(ctx, organizationID, participants)
+	thread, err := s.store.CreateThread(ctx, threadID, organizationID, participants)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -242,7 +246,9 @@ func (s *Server) requireCanInitiateAgentClasses(ctx context.Context, callerID uu
 	return nil
 }
 
-func (s *Server) finalizeParticipants(ctx context.Context, participants []store.ParticipantInput, initiatorID uuid.UUID, hasInitiator bool) ([]store.ParticipantInput, []uuid.UUID, error) {
+// originThreadID is the thread the participants are being added to, reported
+// to Agents so a class policy of origin can make it the instance default.
+func (s *Server) finalizeParticipants(ctx context.Context, participants []store.ParticipantInput, initiatorID uuid.UUID, hasInitiator bool, originThreadID uuid.UUID) ([]store.ParticipantInput, []uuid.UUID, error) {
 	if len(participants) == 0 {
 		return nil, nil, nil
 	}
@@ -258,7 +264,7 @@ func (s *Server) finalizeParticipants(ctx context.Context, participants []store.
 	seen := make(map[uuid.UUID]struct{}, len(participants))
 	agentClassIDs := make([]uuid.UUID, 0)
 	for i, participant := range participants {
-		storedID, agentClassID, err := s.finalParticipantID(ctx, participant.ID, typesByID[participant.ID])
+		storedID, agentClassID, err := s.finalParticipantID(ctx, participant.ID, typesByID[participant.ID], originThreadID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -323,10 +329,10 @@ func (s *Server) identityTypes(ctx context.Context, ids []uuid.UUID) (map[uuid.U
 	return typesByID, nil
 }
 
-func (s *Server) finalParticipantID(ctx context.Context, id uuid.UUID, identityType identityv1.IdentityType) (uuid.UUID, uuid.UUID, error) {
+func (s *Server) finalParticipantID(ctx context.Context, id uuid.UUID, identityType identityv1.IdentityType, originThreadID uuid.UUID) (uuid.UUID, uuid.UUID, error) {
 	switch identityType {
 	case identityv1.IdentityType_IDENTITY_TYPE_AGENT:
-		instanceID, err := s.createAgentInstance(ctx, id)
+		instanceID, err := s.createAgentInstance(ctx, id, originThreadID)
 		if err != nil {
 			return uuid.UUID{}, uuid.UUID{}, err
 		}
@@ -347,11 +353,69 @@ func (s *Server) finalParticipantID(ctx context.Context, id uuid.UUID, identityT
 	}
 }
 
-func (s *Server) createAgentInstance(ctx context.Context, agentID uuid.UUID) (uuid.UUID, error) {
+// resolveSendThread fills in a thread the caller left out. Only an agent
+// instance may: it falls back to the thread it was created to serve, which is
+// resolved here from the caller's own identity rather than from anything the
+// container could carry, so a stale value cannot misroute a message.
+//
+// Deliberately not the thread of whatever woke the instance. In A -> B -> C, B
+// is woken by C's reply on thread BC while owing its answer to A on thread AB;
+// origin composes, the trigger does not.
+func (s *Server) resolveSendThread(ctx context.Context, raw string) (uuid.UUID, error) {
+	if trimmed := strings.TrimSpace(raw); trimmed != "" {
+		threadID, err := parseUUID(trimmed)
+		if err != nil {
+			return uuid.UUID{}, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
+		}
+		return threadID, nil
+	}
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	if !strings.EqualFold(incomingMetadataValue(ctx, identityTypeMetadataKey), agentInstanceIdentityType) {
+		return uuid.UUID{}, status.Error(codes.InvalidArgument, "thread_id is required")
+	}
 	if s.agents == nil {
 		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
 	}
-	response, err := s.agents.CreateInstance(ctx, &agentsv1.CreateInstanceRequest{AgentId: agentID.String()})
+	response, err := s.agents.GetInstance(ctx, &agentsv1.GetInstanceRequest{Id: identityID.String()})
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "get agent instance: %v", err)
+	}
+	defaultThreadID := strings.TrimSpace(response.GetInstance().GetDefaultThreadId())
+	if defaultThreadID == "" {
+		return uuid.UUID{}, status.Error(codes.FailedPrecondition, "thread_id is required: agent instance has no default thread")
+	}
+	threadID, err := parseUUID(defaultThreadID)
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Internal, "agent instance default_thread_id: %v", err)
+	}
+	return threadID, nil
+}
+
+func incomingMetadataValue(ctx context.Context, key string) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	return metadataValue(md, key)
+}
+
+func protoString(value string) *string { return &value }
+
+// createAgentInstance reports the thread doing the adding as a creation
+// circumstance. It is a fact, not an instruction: the class policy decides
+// whether it becomes the instance's default thread.
+func (s *Server) createAgentInstance(ctx context.Context, agentID uuid.UUID, originThreadID uuid.UUID) (uuid.UUID, error) {
+	if s.agents == nil {
+		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
+	}
+	request := &agentsv1.CreateInstanceRequest{AgentId: agentID.String()}
+	if originThreadID != uuid.Nil {
+		request.Context = &agentsv1.CreateInstanceContext{ThreadId: protoString(originThreadID.String())}
+	}
+	response, err := s.agents.CreateInstance(ctx, request)
 	if err != nil {
 		return uuid.UUID{}, status.Errorf(codes.Internal, "create agent instance: %v", err)
 	}
@@ -459,7 +523,7 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 	if err != nil {
 		return nil, err
 	}
-	finalParticipants, agentClassIDs, err := s.finalizeParticipants(ctx, []store.ParticipantInput{{ID: participantID, Passive: false}}, uuid.Nil, false)
+	finalParticipants, agentClassIDs, err := s.finalizeParticipants(ctx, []store.ParticipantInput{{ID: participantID, Passive: false}}, uuid.Nil, false, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -484,9 +548,9 @@ func (s *Server) AddParticipant(ctx context.Context, req *threadsv1.AddParticipa
 }
 
 func (s *Server) SendMessage(ctx context.Context, req *threadsv1.SendMessageRequest) (*threadsv1.SendMessageResponse, error) {
-	threadID, err := parseUUID(req.GetThreadId())
+	threadID, err := s.resolveSendThread(ctx, req.GetThreadId())
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "thread_id: %v", err)
+		return nil, err
 	}
 	if req.GetBody() == "" && len(req.GetFileIds()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "body or file_ids must be provided")
