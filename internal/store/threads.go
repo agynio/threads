@@ -12,10 +12,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func (s *Store) CreateThread(ctx context.Context, organizationID uuid.UUID, participantInputs []ParticipantInput) (Thread, error) {
+// CreateThread takes the thread's id rather than inventing one, because
+// participants are finalized before the row exists: creating an agent instance
+// has to name the thread that is adding it, and that has to be the same id the
+// thread ends up with.
+func (s *Store) CreateThread(ctx context.Context, threadID uuid.UUID, organizationID uuid.UUID, participantInputs []ParticipantInput) (Thread, error) {
 	var thread Thread
 	err := s.runTx(ctx, func(tx pgx.Tx) error {
-		threadID := uuid.New()
 		now := time.Now().UTC()
 		if _, err := tx.Exec(ctx, `INSERT INTO threads (id, organization_id, status, created_at, updated_at, message_count) VALUES ($1, $2, $3, $4, $4, 0)`, threadID, organizationID, int16(ThreadStatusActive), now); err != nil {
 			return err

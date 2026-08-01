@@ -1,0 +1,7 @@
+{"level":"info","msg":"Inject devspacehelper...","time":"2026-08-01T01:25:27+02:00"}
+{"level":"info","msg":"Successfully injected devspacehelper into pod platform/threads-68dd7fb865-8jsb5","time":"2026-08-01T01:25:29+02:00"}
+{"level":"info","msg":"Start syncing","time":"2026-08-01T01:25:29+02:00"}
+{"level":"info","msg":"Downstream - Initial sync completed","time":"2026-08-01T01:25:30+02:00"}
+{"level":"info","msg":"Upstream - Upload 41 create change(s) (Uncompressed ~301.36 KB)","time":"2026-08-01T01:25:31+02:00"}
+{"level":"info","msg":"Upstream - Successfully processed 41 change(s)","time":"2026-08-01T01:25:31+02:00"}
+{"level":"info","msg":"Upstream - Initial sync completed","time":"2026-08-01T01:25:32+02:00"}
