@@ -25,9 +25,16 @@ functions:
     else
       echo "WARNING: ArgoCD Application 'threads' not found in argocd namespace."
     fi
+  threads_deployment: |-
+    # The release name varies by install: the umbrella chart names it
+    # threads-threads, a standalone install just threads. Resolve it by label
+    # rather than guessing.
+    kubectl get deployment -n ${THREADS_NAMESPACE} \
+      -l app.kubernetes.io/name=threads \
+      -o jsonpath='{.items[0].metadata.name}'
   patch_deployment: |-
     echo "Patching threads deployment for DevSpace..."
-    kubectl patch deployment threads-threads -n ${THREADS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
+    kubectl patch deployment "$(threads_deployment)" -n ${THREADS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
     spec:
       template:
         spec:
@@ -42,15 +49,36 @@ functions:
             - name: threads
               image: ghcr.io/agynio/devcontainer-go:1 # keep in sync with E2E_IMAGE
               workingDir: /opt/app/data
+              # All three go. The container generates and compiles before it
+              # listens, so liveness would restart it mid-build -- and devspace
+              # will not start syncing until the pod is ready, so a readiness
+              # probe on the port deadlocks: no source, so no listener, so never
+              # ready, so no sync. The dev pipeline waits on port 50051 itself
+              # once the sync is through.
+              livenessProbe: null
+              startupProbe: null
+              readinessProbe: null
               command:
                 - sh
                 - -c
                 - |
                   set -eu
+                  # devspace only starts syncing once the pod is up, and waits
+                  # for it to be ready first -- so exiting here restarts the
+                  # container and the sync never lands. Wait for the whole set
+                  # generation needs, not just go.mod, or buf runs on a half
+                  # synced tree.
                   elapsed=0
-                  while [ ! -f /opt/app/data/go.mod ]; do
+                  until [ -f /opt/app/data/go.mod ] \
+                    && [ -f /opt/app/data/go.sum ] \
+                    && [ -f /opt/app/data/buf.gen.yaml ] \
+                    && [ -f /opt/app/data/buf.yaml ]; do
                     sleep 1; elapsed=$((elapsed + 1))
-                    [ "$elapsed" -ge 120 ] && { echo "ERROR: sync timeout" >&2; exit 1; }
+                    if [ "$elapsed" -ge 600 ]; then
+                      echo "ERROR: sync timeout waiting for source files" >&2
+                      ls -la /opt/app/data >&2 || true
+                      exit 1
+                    fi
                   done
                   buf generate buf.build/agynio/api --path agynio/api/threads/v1 --path agynio/api/notifications/v1 --path agynio/api/identity/v1 --path agynio/api/metering/v1 --path agynio/api/authorization/v1 --path agynio/api/agents/v1
                   exec go run ./cmd/threads
@@ -94,8 +122,8 @@ deployments:
           app.kubernetes.io/name: threads-e2e
 
 commands:
-  test:e2e: |-
-    devspace run-pipeline test:e2e $@
+  test-e2e: |-
+    devspace run-pipeline test-e2e $@
 
 pipelines:
   dev:
@@ -127,7 +155,7 @@ pipelines:
         stop_dev threads
       fi
 
-  test:e2e:
+  test-e2e:
     run: |-
       create_deployments e2e-runner
       start_dev e2e-runner &
@@ -153,9 +181,10 @@ hooks:
 dev:
   threads:
     namespace: ${THREADS_NAMESPACE}
+    # Name only: the instance label is the Helm release, which is threads for a
+    # standalone install and agyn-platform under the umbrella chart.
     labelSelector:
       app.kubernetes.io/name: threads
-      app.kubernetes.io/instance: threads
     containers:
       threads:
         container: threads
