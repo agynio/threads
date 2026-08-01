@@ -113,3 +113,37 @@ func TestResolveSendThreadRejectsAMalformedThread(t *testing.T) {
 		t.Fatalf("expected InvalidArgument, got %v", err)
 	}
 }
+
+// Agents checks that the caller can initiate the class, so the identity of
+// whoever is adding the agent has to reach it. Called as Threads -- with no
+// identity at all -- CreateInstance refuses and class-on-add fails outright.
+func TestCreateAgentInstanceForwardsTheCallerIdentity(t *testing.T) {
+	callerID := uuid.New()
+	originThreadID := uuid.New()
+	instanceID := uuid.New()
+	var seen metadata.MD
+	agents := &stubAgentsService{
+		t: t,
+		createFn: func(ctx context.Context, req *agentsv1.CreateInstanceRequest, _ ...grpc.CallOption) (*agentsv1.CreateInstanceResponse, error) {
+			seen, _ = metadata.FromOutgoingContext(ctx)
+			if got := req.GetContext().GetThreadId(); got != originThreadID.String() {
+				t.Fatalf("expected the origin thread %s, got %q", originThreadID, got)
+			}
+			return &agentsv1.CreateInstanceResponse{Instance: &agentsv1.AgentInstance{
+				Meta: &agentsv1.EntityMeta{Id: instanceID.String()},
+			}}, nil
+		},
+	}
+	srv := New(nil, nil, nil, nil, agents, nil)
+
+	got, err := srv.createAgentInstance(identityContext(callerID, "user"), uuid.New(), originThreadID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if got != instanceID {
+		t.Fatalf("expected %s, got %s", instanceID, got)
+	}
+	if values := seen.Get(identityIDMetadataKey); len(values) != 1 || values[0] != callerID.String() {
+		t.Fatalf("expected the caller identity to be forwarded, got %v", values)
+	}
+}
