@@ -411,11 +411,19 @@ func (s *Server) createAgentInstance(ctx context.Context, agentID uuid.UUID, ori
 	if s.agents == nil {
 		return uuid.UUID{}, status.Error(codes.Internal, "agents service not configured")
 	}
+	// Forwarded rather than called as Threads: the instance is created on
+	// behalf of whoever is adding the agent, and Agents checks that principal
+	// can initiate the class. Called without it, CreateInstance refuses --
+	// which made class-on-add fail outright.
+	identityCtx, err := identityClientContext(ctx)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
 	request := &agentsv1.CreateInstanceRequest{AgentId: agentID.String()}
 	if originThreadID != uuid.Nil {
 		request.Context = &agentsv1.CreateInstanceContext{ThreadId: protoString(originThreadID.String())}
 	}
-	response, err := s.agents.CreateInstance(ctx, request)
+	response, err := s.agents.CreateInstance(identityCtx, request)
 	if err != nil {
 		return uuid.UUID{}, status.Errorf(codes.Internal, "create agent instance: %v", err)
 	}
