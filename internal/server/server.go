@@ -62,6 +62,8 @@ type threadStore interface {
 	ClaimPendingAgentInboxDeliveries(ctx context.Context, limit int32) ([]store.AgentInboxDelivery, error)
 	MarkAgentInboxDeliveryDelivered(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID) error
 	MarkAgentInboxDeliveryFailed(ctx context.Context, messageID, agentInstanceID, claimID uuid.UUID, deliveryError string) error
+	ListOrganizationThreadTuples(ctx context.Context, organizationID uuid.UUID) ([]store.OrganizationThreadTuples, error)
+	DeleteOrganizationThreads(ctx context.Context, organizationID uuid.UUID) error
 }
 
 type identityResolver interface {
@@ -1631,4 +1633,70 @@ func toStatusError(err error) error {
 	default:
 		return status.Errorf(codes.Internal, "internal error: %v", err)
 	}
+}
+
+// tupleDeleteBatchSize is OpenFGA's per-Write limit. A busy organization has
+// more threads than that, so the deletes go out in batches rather than one
+// call that would be rejected whole.
+const tupleDeleteBatchSize = 100
+
+func (s *Server) deleteTuples(ctx context.Context, deletes []*authorizationv1.TupleKey) error {
+	if s.authorization == nil {
+		return status.Error(codes.Internal, "authorization service not configured")
+	}
+	for start := 0; start < len(deletes); start += tupleDeleteBatchSize {
+		end := min(start+tupleDeleteBatchSize, len(deletes))
+		if _, err := s.authorization.Write(ctx, &authorizationv1.WriteRequest{Deletes: deletes[start:end]}); err != nil {
+			return status.Errorf(codes.Internal, "authorization write: %v", err)
+		}
+	}
+	return nil
+}
+
+// DeleteOrganizationResources removes the threads carrying the organization's
+// id, and their messages through the cascade. It is internal: Istio settles who
+// may call it, so there is no permission check and no caller identity to check
+// against. Step 4 of the organization teardown, after the agent instances that
+// participated in these threads and after the chats that sat on them.
+//
+// Tuples come off before the rows, the way the groups teardown does it: a step
+// interrupted after the rows are gone would have nothing left to enumerate the
+// tuples from, and they would outlive the organization unreachable.
+//
+// Idempotent by construction: a retried step lists nothing and deletes nothing.
+func (s *Server) DeleteOrganizationResources(ctx context.Context, req *threadsv1.DeleteOrganizationResourcesRequest) (*threadsv1.DeleteOrganizationResourcesResponse, error) {
+	organizationID, err := uuid.Parse(req.GetOrganizationId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
+	}
+
+	threads, err := s.store.ListOrganizationThreadTuples(ctx, organizationID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list organization threads: %v", err)
+	}
+
+	deletes := make([]*authorizationv1.TupleKey, 0, len(threads))
+	for _, thread := range threads {
+		threadObject := fmt.Sprintf("%s%s", threadObjectPrefix, thread.ThreadID.String())
+		deletes = append(deletes, &authorizationv1.TupleKey{
+			User:     fmt.Sprintf("%s%s", organizationObjectPrefix, organizationID.String()),
+			Relation: "org",
+			Object:   threadObject,
+		})
+		for _, participantID := range thread.ParticipantIDs {
+			deletes = append(deletes, &authorizationv1.TupleKey{
+				User:     fmt.Sprintf("%s%s", identityObjectPrefix, participantID.String()),
+				Relation: "participant",
+				Object:   threadObject,
+			})
+		}
+	}
+	if err := s.deleteTuples(ctx, deletes); err != nil {
+		return nil, err
+	}
+
+	if err := s.store.DeleteOrganizationThreads(ctx, organizationID); err != nil {
+		return nil, status.Errorf(codes.Internal, "delete organization threads: %v", err)
+	}
+	return &threadsv1.DeleteOrganizationResourcesResponse{}, nil
 }

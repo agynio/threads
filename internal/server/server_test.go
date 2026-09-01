@@ -35,6 +35,8 @@ type stubThreadStore struct {
 	getThreadFn                        func(ctx context.Context, threadID uuid.UUID) (store.Thread, error)
 	listOrgThreadsFn                   func(ctx context.Context, organizationID uuid.UUID, filter store.OrganizationThreadFilter, sort store.OrganizationThreadSort, pageSize int32, cursor *store.OrganizationThreadCursor) (store.OrganizationThreadListResult, error)
 	listMessagesFn                     func(ctx context.Context, threadID uuid.UUID, pageSize int32, cursor *store.MessageCursor, order store.MessageOrder) (store.MessageListResult, error)
+	listOrgThreadTuplesFn              func(ctx context.Context, organizationID uuid.UUID) ([]store.OrganizationThreadTuples, error)
+	deleteOrgThreadsFn                 func(ctx context.Context, organizationID uuid.UUID) error
 	listUnackedFn                      func(ctx context.Context, participantID uuid.UUID, threadID *uuid.UUID, pageSize int32, cursor *store.MessageCursor) (store.MessageListResult, error)
 	unackedCountsFn                    func(ctx context.Context, participantID uuid.UUID) (map[uuid.UUID]int32, error)
 	ackMessagesFn                      func(ctx context.Context, participantID uuid.UUID, messageIDs []uuid.UUID) (int32, error)
@@ -51,6 +53,20 @@ func (s *stubThreadStore) CreateThread(ctx context.Context, threadID uuid.UUID, 
 		s.t.Fatalf("unexpected CreateThread call")
 	}
 	return s.createThreadFn(ctx, threadID, organizationID, participants)
+}
+
+func (s *stubThreadStore) ListOrganizationThreadTuples(ctx context.Context, organizationID uuid.UUID) ([]store.OrganizationThreadTuples, error) {
+	if s.listOrgThreadTuplesFn == nil {
+		return nil, nil
+	}
+	return s.listOrgThreadTuplesFn(ctx, organizationID)
+}
+
+func (s *stubThreadStore) DeleteOrganizationThreads(ctx context.Context, organizationID uuid.UUID) error {
+	if s.deleteOrgThreadsFn == nil {
+		return nil
+	}
+	return s.deleteOrgThreadsFn(ctx, organizationID)
 }
 
 func (s *stubThreadStore) ArchiveThread(ctx context.Context, threadID uuid.UUID) (store.Thread, error) {
@@ -3149,5 +3165,100 @@ func TestDrainPendingAgentInboxDeliveriesContinuesAfterFailure(t *testing.T) {
 	}
 	if !deliveredMarked {
 		t.Fatal("expected delivered mark after failure")
+	}
+}
+
+func TestDeleteOrganizationResourcesRemovesTuplesBeforeRows(t *testing.T) {
+	organizationID := uuid.New()
+	firstThread, secondThread := uuid.New(), uuid.New()
+	participant := uuid.New()
+
+	var order []string
+	storeStub := &stubThreadStore{
+		t: t,
+		listOrgThreadTuplesFn: func(_ context.Context, id uuid.UUID) ([]store.OrganizationThreadTuples, error) {
+			if id != organizationID {
+				t.Fatalf("expected organization %s, got %s", organizationID, id)
+			}
+			return []store.OrganizationThreadTuples{
+				{ThreadID: firstThread, ParticipantIDs: []uuid.UUID{participant}},
+				{ThreadID: secondThread},
+			}, nil
+		},
+		deleteOrgThreadsFn: func(context.Context, uuid.UUID) error {
+			order = append(order, "rows")
+			return nil
+		},
+	}
+	var deleted []*authorizationv1.TupleKey
+	authStub := &stubAuthorizationService{
+		t: t,
+		writeFn: func(_ context.Context, req *authorizationv1.WriteRequest, _ ...grpc.CallOption) (*authorizationv1.WriteResponse, error) {
+			order = append(order, "tuples")
+			deleted = append(deleted, req.GetDeletes()...)
+			return &authorizationv1.WriteResponse{}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	// Internal RPC: no identity in the context, and none required.
+	_, err := srv.DeleteOrganizationResources(context.Background(), &threadsv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: organizationID.String(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Tuples first: a step interrupted after the rows are gone would have
+	// nothing left to enumerate the tuples from.
+	if len(order) != 2 || order[0] != "tuples" || order[1] != "rows" {
+		t.Fatalf("expected tuples before rows, got %v", order)
+	}
+	// Two org tuples and one participant tuple.
+	if len(deleted) != 3 {
+		t.Fatalf("expected 3 tuple deletes, got %d: %v", len(deleted), deleted)
+	}
+}
+
+func TestDeleteOrganizationResourcesBatchesTupleDeletes(t *testing.T) {
+	// OpenFGA caps a Write at 100 tuples, and a busy organization has more
+	// threads than that.
+	threads := make([]store.OrganizationThreadTuples, 150)
+	for i := range threads {
+		threads[i] = store.OrganizationThreadTuples{ThreadID: uuid.New()}
+	}
+	storeStub := &stubThreadStore{
+		t: t,
+		listOrgThreadTuplesFn: func(context.Context, uuid.UUID) ([]store.OrganizationThreadTuples, error) {
+			return threads, nil
+		},
+	}
+	var batches []int
+	authStub := &stubAuthorizationService{
+		t: t,
+		writeFn: func(_ context.Context, req *authorizationv1.WriteRequest, _ ...grpc.CallOption) (*authorizationv1.WriteResponse, error) {
+			batches = append(batches, len(req.GetDeletes()))
+			return &authorizationv1.WriteResponse{}, nil
+		},
+	}
+
+	srv := New(storeStub, nil, authStub, nil, nil, nil)
+	if _, err := srv.DeleteOrganizationResources(context.Background(), &threadsv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: uuid.New().String(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(batches) != 2 || batches[0] != 100 || batches[1] != 50 {
+		t.Fatalf("expected batches of 100 then 50, got %v", batches)
+	}
+}
+
+func TestDeleteOrganizationResourcesRejectsInvalidOrganizationID(t *testing.T) {
+	srv := New(&stubThreadStore{t: t}, nil, allowAuthStub(t), nil, nil, nil)
+	_, err := srv.DeleteOrganizationResources(context.Background(), &threadsv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: "not-a-uuid",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %v", err)
 	}
 }

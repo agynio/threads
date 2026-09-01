@@ -23,3 +23,30 @@ spec:
               - POST
             paths:
               - /agynio.api.threads.v1.ThreadsService/DegradeThread
+---
+# DeleteOrganizationResources is one step of the organization teardown. It has
+# no caller identity to authorize, so who may reach it at all is settled here.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ .Release.Name }}-delete-organization-resources
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notPrincipals:
+              - "cluster.local/ns/{{ .Release.Namespace }}/sa/organizations"
+      to:
+        - operation:
+            methods:
+              - POST
+            paths:
+              - /agynio.api.threads.v1.ThreadsService/DeleteOrganizationResources
