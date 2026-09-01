@@ -370,3 +370,49 @@ func (s *Store) GetThread(ctx context.Context, threadID uuid.UUID) (Thread, erro
 	}
 	return thread, nil
 }
+
+// OrganizationThreadTuples is one thread's identity in the authorization model:
+// the thread itself, and the participants holding a relation on it. Both come
+// off before the row does.
+type OrganizationThreadTuples struct {
+	ThreadID       uuid.UUID
+	ParticipantIDs []uuid.UUID
+}
+
+// ListOrganizationThreadTuples returns every thread the organization carries,
+// with its participants, unpaginated. The teardown needs all of them.
+func (s *Store) ListOrganizationThreadTuples(ctx context.Context, organizationID uuid.UUID) ([]OrganizationThreadTuples, error) {
+	rows, err := s.pool.Query(ctx, `
+        SELECT t.id, COALESCE(ARRAY_AGG(p.participant_id) FILTER (WHERE p.participant_id IS NOT NULL), '{}')
+        FROM threads t
+        LEFT JOIN thread_participants p ON p.thread_id = t.id
+        WHERE t.organization_id = $1
+        GROUP BY t.id`, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	threads := []OrganizationThreadTuples{}
+	for rows.Next() {
+		var entry OrganizationThreadTuples
+		var participants pgtype.FlatArray[uuid.UUID]
+		if err := rows.Scan(&entry.ThreadID, &participants); err != nil {
+			return nil, err
+		}
+		entry.ParticipantIDs = participants
+		threads = append(threads, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return threads, nil
+}
+
+// DeleteOrganizationThreads removes the organization's threads. Messages,
+// participants, recipients, and inbox deliveries follow through ON DELETE
+// CASCADE.
+func (s *Store) DeleteOrganizationThreads(ctx context.Context, organizationID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM threads WHERE organization_id = $1`, organizationID)
+	return err
+}
